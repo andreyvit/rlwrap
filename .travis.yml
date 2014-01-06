@@ -2,6 +2,10 @@ language: c
 compiler:
   - clang
   - gcc
+matrix:
+  allow_failures:
+    - compiler: clang
+  fast_finish: true
 before_install:
   - echo "before install"
   - sudo apt-get -q update
