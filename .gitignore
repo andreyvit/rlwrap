@@ -1,0 +1,5 @@
+*.o
+*~
+*.log
+build/
+autom4te.cache/

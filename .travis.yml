@@ -1,0 +1,26 @@
+language: c
+compiler:
+  - clang
+  - gcc
+before_install:
+  - echo "before install"
+  - sudo apt-get -q update
+  - sudo apt-get -q upgrade
+install:
+  - echo "install"
+before_script:
+  - echo "before script"
+script:
+  - echo "script"
+  - mkdir --verbose --parents ./build
+  - cd ./build
+  - autoreconf --verbose --force --install ..
+  - ../configure --prefix=${HOME}
+  - make --debug distcheck
+  - cd ..
+after_success:
+  - echo "after success"
+after_failure:
+  - echo "after failure"
+after_script:
+  - echo "after script"
