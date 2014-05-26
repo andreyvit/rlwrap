@@ -49,7 +49,7 @@ yield()
 }
 
 
-static int signal_handled = FALSE;
+static volatile int signal_handled = FALSE;
 
 #ifdef HAVE_REAL_PSELECT
 
@@ -61,7 +61,9 @@ void zero_select_timeout () {
 
 
 #define until_hell_freezes  NULL ;
-static struct timeval *pmy_select_timeout_tv;
+static struct timeval * volatile pmy_select_timeout_tv; /* The SIGCHLD handler sets this variable (see zero_select_timeout() below) to make
+                                                          select() return immediately when a child has died. gcc (4.8 and higher) may optimize it 
+                                                          into a register, which won't work: hence the "volatile" keyword */ 
 static struct timeval my_select_timeout_tv;
 
 void zero_select_timeout () {
@@ -103,13 +105,14 @@ my_pselect(int n, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, const st
   } else
     pmy_select_timeout_tv = until_hell_freezes;
   signal_handled = FALSE;
-    
+      
   sigprocmask(SIG_SETMASK, sigmask, &oldmask);
   /* most signals will be catched HERE (and their handlers will set my_select_timeout_tv to {0,0}) */
   retval = select(n, readfds, writefds, exceptfds, pmy_select_timeout_tv);
   /* but even if they are slow off the mark and get catched HERE the code 3 lines below will notice */
   sigprocmask(SIG_SETMASK, &oldmask, NULL);
-
+  
+                  
   if (signal_handled && retval >= 0) { 
     errno = EINTR;
     return -1;
@@ -158,7 +161,7 @@ write_patiently(int fd, const void *buffer, int count, const char *whither) {
       else if (errno == EPIPE || nwritten == 0) {
         return FALSE;
       } else 
-        myerror("write error %s", whither);
+        myerror(FATAL|USE_ERRNO, "write error %s", whither);
     }   
     
     total_written += nwritten;
@@ -195,19 +198,19 @@ read_patiently2 (int fd,
       assert(count > total_read);
       if((nread = read(fd, (char *) buffer + total_read, count - total_read)) <= 0) {
         if (nread < 0 && errno == EINTR) {
-          if (interruptible) {
-            errno = 0; myerror("(user) interrupt, filter_hangs?", whence);
-          }
+          if (interruptible) 
+            myerror(FATAL|NOERRNO, "(user) interrupt reading %s, filter_hangs?", whence);
+          
           if (received_sigALRM) {
             received_sigALRM = FALSE;
             interruptible = TRUE;
           }
           continue;
-        } else if (nread == 0)  {
-          errno = 0; myerror("EOF reading %s", whence);
-        } else { /* nread < 0 */        
-          myerror("error reading %s",  whence);
-        }
+        } else if (nread == 0)  
+           myerror(FATAL|NOERRNO, "EOF reading %s", whence);
+         else  /* nread < 0 */        
+           myerror(FATAL|USE_ERRNO, "error reading %s",  whence);
+        
       }
       total_read += nread;
       if (total_read == count)  /* done */
@@ -246,15 +249,15 @@ write_patiently2(int fd,
     if((nwritten = write(fd, (char *)buffer + total_written, count - total_written)) <= 0) {
       if (nwritten < 0 && errno == EINTR) {
         if (interruptible)
-          errno = 0; myerror("(user) interrupt - filter hangs?");
+           myerror(FATAL|NOERRNO, "(user) interrupt - filter hangs?");
         if (received_sigALRM) {
           received_sigALRM = FALSE;
           interruptible = TRUE;
         }
         continue;
-      } else { /* nwritten== 0 or < 0 with error other than EINTR */
-        myerror("error writing %s", whither);
-      }
+      } else  /* nwritten== 0 or < 0 with error other than EINTR */
+        myerror(FATAL|USE_ERRNO, "error writing %s", whither);
+      
     }
     total_written += nwritten;
     if (total_written == count) /* done */      
@@ -280,11 +283,11 @@ mysetenv(const char *name, const char *value)
   char *name_is_value = add3strings (name, "=", value);
   return_value = putenv (name_is_value);
 #else /* won't happen, but anyway: */      
-  mywarn("setting environment variable %s=%s failed, as this system has neither setenv() nor putenv()", name, value);
+  myerror(WARNING|NOERRNO, "setting environment variable %s=%s failed, as this system has neither setenv() nor putenv()", name, value);
 #endif
      
   if (return_value != 0)
-    mywarn("setting environment variable %s=%s failed%s", name, value,
+    myerror(WARNING|USE_ERRNO, "setting environment variable %s=%s failed%s", name, value,
            (errno ? "" : " (insufficient environment space?)"));     /* will setenv(...) = -1  set errno? */
 }       
           
@@ -300,37 +303,38 @@ void set_ulimit(int resource, long value) {
   #endif
 }
 
-/* private helper function for myerror() and mywarn() */
-static void
-utils_warn(const char *message, va_list ap)
-{
 
-  int saved_errno = errno;
-  char buffer[BUFFSIZE];
-  
 
-  snprintf(buffer, sizeof(buffer) - 1, "%s: ", program_name);
-  vsnprintf(buffer + strlen(buffer), sizeof(buffer) - strlen(buffer) - 1,
-            message, ap);
-  if (saved_errno)
-    snprintf(buffer + strlen(buffer), sizeof(buffer) - strlen(buffer) - 1,
-             ": %s", strerror(saved_errno));
-  mystrlcat(buffer, "\n", sizeof(buffer));
 
-  fflush(stdout);
-  if (nowarn) {
-    DPRINTF1(DEBUG_ALL, "%s", buffer);
-  } else
-    fputs(buffer, stderr); /* @@@ error reporting (still) uses bufered I/O */
-  
-  fflush(stderr);
-  errno =  saved_errno;
-  /* we want this because sometimes error messages (esp. from client) are dropped) */
 
-}
 
-/* myerror("utter failure in %s", where) prints a NL-terminated error
-   message ("rlwrap: utter failure in xxxx\n") and exits rlwrap */
+
+int open_unique_tempfile(const char *suffix, char **tmpfile_name) {
+  char **tmpdirs = list4(getenv("TMPDIR"), getenv("TMP"), getenv("TEMP"), "/tmp");
+  char *tmpdir = first_of(tmpdirs);
+  int tmpfile_fd;
+
+  if (!suffix) 
+    suffix = "";
+ 
+  *tmpfile_name = mymalloc(MAXPATHLEN+1);
+
+#ifdef HAVE_MKSTEMPS
+  snprintf4(*tmpfile_name, MAXPATHLEN, "%s/%s_%s_XXXXXX%s", tmpdir, program_name, command_name, suffix); 
+  tmpfile_fd = mkstemps(*tmpfile_name, strlen(suffix));  /* this will write into *tmpfile_name */
+#else
+  {   static int tmpfile_counter = 0;
+      snprintf6(*tmpfile_name, MAXPATHLEN, "%s/%s_%s_%d_%d%s", tmpdir, program_name, command_name, command_pid, tmpfile_counter++, suffix);
+      tmpfile_fd = open(*tmpfile_name, O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR);
+  }
+#endif
+  if (tmpfile_fd < 0)
+    myerror(FATAL|USE_ERRNO, "could not create temporary file %s", tmpfile_name);
+  free(tmpdirs);
+  return tmpfile_fd;
+}  
+
+
   
 
 static char*
@@ -342,33 +346,59 @@ markup(const char*str)
     return mysavestring(str);
 }       
 
-void
-myerror(const char *message, ...)
-{
-  va_list ap;
-  const char *error_message = message;
 
-  va_start(ap, message);
-  utils_warn(error_message, ap);
-  va_end(ap);
-  if (!i_am_child)
-    cleanup_rlwrap_and_exit(EXIT_FAILURE);
-  else /* child: die and let parent clean up */
-    exit(1);
-}
-
-
-void
-mywarn(const char *message, ...)
-{
-  va_list ap;
-  char *warning_message;
-
+/* print error or warning message. There are two error flags,
+   defined in rlwrap.h
   
-  warning_message = add2strings(markup("warning: "), message);
-  va_start(ap, message);
-  utils_warn(warning_message, ap);
+   FATAL:     exit(EXIT_FAILURE) after printing the message)
+   USE_ERRNO: print perror(errno) after the message
+*/
+
+
+void
+myerror(int error_flags, const char *message_format, ...)
+{
+  int saved_errno = errno;
+  char contents[BUFFSIZE];
+  int is_warning = !(error_flags & FATAL);
+  char *warning_or_error = is_warning ? "warning: " : "error: ";
+  static int warnings_given = 0;  
+  char *message = add2strings(program_name, ": ");
+
+  va_list ap;
+  va_start(ap, message_format);
+  vsnprintf(contents, sizeof(contents) - 1, message_format, ap);
   va_end(ap);
+
+  message = append_and_free_old(message, markup(warning_or_error)); 
+  message = append_and_free_old(message, contents);
+                             
+  if ((error_flags & USE_ERRNO) && saved_errno) {
+    message = append_and_free_old(message, ": ");
+    message = append_and_free_old(message, strerror(saved_errno));
+  }                                
+  message = append_and_free_old(message,"\n");                            
+    
+  fflush(stdout);
+  DPRINTF2(DEBUG_ALL, "%s %s", warning_or_error, contents);
+ 
+
+  if (! (is_warning && nowarn))
+    fputs(message, stderr); /* @@@ error reporting (still) uses buffered I/O */
+  if (is_warning && !warnings_given++ && !nowarn) 
+    fputs("\nwarnings can be silenced by the --no-warnings (-n) option\n", stderr);
+  
+  fflush(stderr);
+  free(message);
+  errno =  saved_errno;
+
+  if (error_flags & FATAL) { 
+    if (!i_am_child)
+      cleanup_rlwrap_and_exit(EXIT_FAILURE);
+    else /* child: die and let parent clean up */
+      exit(EXIT_FAILURE);
+  }
+  
 }
 
 
@@ -379,7 +409,7 @@ open_logfile(const char *filename)
 
   log_fp = fopen(filename, "a");
   if (!log_fp)
-    myerror("Cannot write to logfile %s", filename);
+    myerror(FATAL|USE_ERRNO, "Cannot write to logfile %s", filename);
   now = time(NULL);
   fprintf(log_fp, "\n\n[rlwrap] %s\n", ctime(&now));
 }
@@ -398,7 +428,7 @@ filesize(const char *filename)
   struct stat buf;
 
   if (stat(filename, &buf))
-    myerror("couldn't stat file %s", filename);
+    myerror(FATAL|USE_ERRNO, "couldn't stat file %s", filename);
   return (size_t) buf.st_size;
 }
 
@@ -436,7 +466,7 @@ timestamp(char *buf, int size)
   diff_usec = 1000000 * (now.tv_sec -firsttime.tv_sec) + (now.tv_usec - firsttime.tv_usec);
   diff_sec = diff_usec / 1000000.0;
   
-  snprintf1(buf, size, "%4.3f ", diff_sec);
+  snprintf1(buf, size, "%f ", diff_sec);
 }
 
 
@@ -462,7 +492,7 @@ change_working_directory()
   snprintf0(slaves_working_directory, MAXPATHLEN, "?");
 
   if (!initialized && command_pid > 0) {        /* first time we're called after birth of child */
-    snprintf1(proc_pid_cwd, MAXPATHLEN , "/proc/%d/cwd", command_pid);
+    snprintf2(proc_pid_cwd, MAXPATHLEN , "%s/%d/cwd", PROC_MOUNTPOINT, command_pid);
     initialized = TRUE;
   }     
   if (chdir(proc_pid_cwd) == 0) {
@@ -474,7 +504,7 @@ change_working_directory()
       snprintf1(slaves_working_directory, MAXPATHLEN, "? (%s)", strerror(errno));
 #endif /* HAVE_READLINK */
   }                 
-#else
+#else /* HAVE_PROC_PID_CWD */
   /* do nothing at all */
 #endif
 }
@@ -486,8 +516,8 @@ change_working_directory()
 void log_terminal_settings(struct termios *terminal_settings) {
   if (!terminal_settings)
     return;
-  DPRINTF3(DEBUG_TERMIO, "clflag.ISIG: %s, cc_c[VINTR]=%d, cc_c[VEOF]=%d",
-           isset(terminal_settings->c_cflag | ISIG),
+  DPRINTF3(DEBUG_TERMIO, "terminal settings: clflag.ISIG: %s, cc_c[VINTR]=%d, cc_c[VEOF]=%d",
+           isset(terminal_settings->c_lflag | ISIG),
            terminal_settings->c_cc[VINTR],
            terminal_settings->c_cc[VEOF]);
 }
@@ -509,7 +539,9 @@ void log_fd_info(int fd) {
 void
 last_minute_checks()
 {
-
+  /* flag unhealthy option combinations */
+  if (multiline_separator && filter_command)
+    myerror(WARNING|NOERRNO, "Filters don't work very well with multi-line rlwrap!");
 }
 
 
@@ -574,12 +606,13 @@ usage(int status)
           "\n"
           "Options:\n", program_name);
 
-  print_option('a', "always-readline", "password:", TRUE, NULL);
+  print_option('a', "always-readline", "password prompt", TRUE, NULL);
   print_option('A', "ansi-colour-aware", NULL, FALSE, NULL);
   print_option('b', "break-chars", "chars", FALSE, NULL);
   print_option('c', "complete-filenames", NULL, FALSE, NULL);
   print_option('C', "command-name", "name|N", FALSE, NULL);
   print_option('D', "history-no-dupes", "0|1|2", FALSE, NULL);
+  print_option('e', "extra-char-after-completion", "char|''", FALSE, NULL);   
   print_option('f', "file", "completion list", FALSE,NULL);
   print_option('g', "forget-matching", "regexp", FALSE,NULL);
   print_option('h', "help", NULL, FALSE, NULL);
@@ -595,6 +628,7 @@ usage(int status)
   print_option('P', "pre-given","input", FALSE, NULL);
   print_option('q', "quote-characters", "chars", FALSE, NULL);
   print_option('m', "multi-line", "newline substitute", TRUE, NULL);
+  print_option('M', "multi-line-ext", ".ext", FALSE, NULL);
   print_option('r', "remember", NULL, FALSE, NULL);
   print_option('R', "renice", NULL, FALSE, NULL);
   print_option('v', "version", NULL, FALSE, NULL);
@@ -602,7 +636,9 @@ usage(int status)
   print_option('S', "substitute-prompt", "prompt", FALSE, NULL);
   print_option('t', "set-term-name", "name", FALSE, NULL);
   print_option('w', "wait-before-prompt", "N", FALSE, "(msec, <0  : patient mode)");
-  print_option('z', "filter", "filter command", FALSE, NULL);  
+  print_option('W', "polling", NULL, FALSE, NULL);
+  print_option('z', "filter", "filter command", FALSE, "(-z listing lists installed filters)");  
+  
  
 #ifdef DEBUG
   fprintf(stderr, "\n");
@@ -611,7 +647,7 @@ usage(int status)
   fprintf(stderr,
           "             \n"
           "The -d or --debug option *must* come first\n"
-          "The debugging mask is a bit mask obtained by adding:\n");
+          "The debugging mask is a bitmask obtained by adding:\n");
 
   print_debug_flag (DEBUG_TERMIO, "to debug termio,");
   print_debug_flag (DEBUG_SIGNALS, "signal handling,");
@@ -621,7 +657,7 @@ usage(int status)
   /*  print_debug_flag (DEBUG_AD_HOC, "to see your own DEBUG_AD_HOC results"); */
   print_debug_flag (DEBUG_WITH_TIMESTAMPS, "to add (relative) timestamps");
   print_debug_flag (FORCE_HOMEGROWN_REDISPLAY, "to force the use of my_homegrown_redisplay()");
-  print_debug_flag (DEBUG_LONG_STRINGS, "to not limit the length of strings in debug log");
+  print_debug_flag (DEBUG_LONG_STRINGS, "to not limit the length of strings in debug log (sloooow!)");
   print_debug_flag (DEBUG_RACES, "add random delays to expose race conditions");
   fprintf(stderr,  "    default debug mask = %d (debug termio, signals and readline handling)\n"
                    "    use the shell construct $[ ] to calculate the mask, e.g. -d$[%d+%d+%d]\n",

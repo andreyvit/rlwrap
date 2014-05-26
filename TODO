@@ -9,6 +9,8 @@ SHORT-TERM:
 
 - find analogues of /proc/$command_pid/wchan on other unices
 
+- create $RLWRAP_DIR if it doesn't exist
+- fix cross-compilation
 
 LONG-TERM:
 

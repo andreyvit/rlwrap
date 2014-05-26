@@ -20,7 +20,7 @@
 
 #include "rlwrap.h"
 
-int command_is_dead = FALSE;
+volatile int command_is_dead = FALSE;
 int commands_exit_status = 0;
 int filter_is_dead = FALSE;
 int filters_exit_status = 0;
@@ -72,10 +72,10 @@ mysignal(int sig, sighandler_type handler) {
   action.sa_flags = (sig == SIGCHLD ? SA_NOCLDSTOP : 0); /* no SA_RESTART */
   if (sigaction(sig, &action, NULL) != 0)
 # else /* rlwrap running in Ye Olde Computer Museum?? */
-  if (signal(sig, handler) == SIGERR)
+  if (signal(sig, handler) == SIG_ERR)
 # endif
     if(handler != SIG_DFL) /* allow e.g. KILL to be set to its default */ 
-      myerror("Error setting handler for signal %d (%s)", sig, signal_name(sig));   
+      myerror(FATAL|USE_ERRNO, "Failed setting handler for signal %d (%s)", sig, signal_name(sig));   
 }
 
 
@@ -85,10 +85,10 @@ install_signal_handlers()
   int i;
   mysignal(SIGCHLD, &child_died);
   mysignal(SIGTSTP, &handle_sigTSTP);
-#ifndef DEBUG
+#ifndef DEBUG          /* we want core dumps when debugging, no polite excuses! */
   for (i = 1; i<MAX_SIG; i++)
     if (signals_program_error(i))
-      mysignal(i, &handle_program_error_signal);        /* we want core dumps when debugging, no polite excuses! */
+      mysignal(i, &handle_program_error_signal); /* make polite excuse */
 #endif
   mysignal(SIGALRM, &handle_sigALRM);
   for (i = 1;  signals_to_be_passed_on[i]; i++) {
@@ -186,7 +186,7 @@ handle_sigTSTP(int signo)
   zero_select_timeout();
   /* Hand the SIGTSTP down to command and its process group */
   if (command_pid && (error = kill(-command_pid, SIGTSTP))) {
-    myerror("Failed to deliver SIGTSTP");
+    myerror(FATAL|USE_ERRNO, "Failed to deliver SIGTSTP");
   }
 
   if (within_line_edit)
@@ -206,11 +206,11 @@ handle_sigTSTP(int signo)
   DPRINTF0(DEBUG_SIGNALS, "woken up");
 
   /* On most systems, command's process group will have been woken up by the handler of
-     the signal that woke us up. This doesn't sem to happen for SIGCONT on QNX, so here goes: */
+     the signal that woke us up. This doesn't seem to happen for SIGCONT on QNX, so here goes: */
 
   #ifdef __QNX__
   if (command_pid && (error = kill(-command_pid, SIGCONT))) {
-    myerror("Failed to deliver SIGCONT");
+    myerror(FATAL|USE_ERRNO, "Failed to deliver SIGCONT");
   }
   #endif
   
@@ -291,8 +291,9 @@ adapt_tty_winsize(int from_fd, int to_fd)
   ret = ioctl(from_fd, TIOCGWINSZ, &winsize);
   DPRINTF1(DEBUG_SIGNALS, "ioctl (..., TIOCGWINSZ) = %d", ret);
   if (winsize.ws_col != old_winsize.ws_col || winsize.ws_row != old_winsize.ws_row) { 
-    if (always_readline &&!dont_wrap_command_waits())                       /* if --always_readline option is set, the client will probably spew a */
-      deferred_adapt_commands_window_size = TRUE;   /* volley of control chars at us when its terminal is resized. Hence we don't do it now */
+    DPRINTF4(DEBUG_SIGNALS, "ws.col: %d -> %d, ws.row: %d -> %d", old_winsize.ws_col, winsize.ws_col, old_winsize.ws_row, winsize.ws_row);
+    if (always_readline &&!dont_wrap_command_waits())  /* if --always_readline option is set, the client will probably spew a */
+      deferred_adapt_commands_window_size = TRUE;      /* volley of control chars at us when its terminal is resized. Hence we don't do it now */
     else {  
       ret = ioctl(to_fd, TIOCSWINSZ, &winsize); 
       DPRINTF1(DEBUG_SIGNALS, "ioctl (..., TIOCSWINSZ) = %d", ret);
@@ -325,9 +326,10 @@ void wipe_textarea(struct winsize *old_winsize)
 {
   int point, lineheight, linelength, cursor_height, i, promptlength;
   if (!prompt_is_single_line()) {       /* Don't need to do anything in horizontal_scroll_mode  */
-    promptlength = colourless_strlen((saved_rl_state.cooked_prompt ? saved_rl_state.cooked_prompt:  saved_rl_state.raw_prompt), NULL); 
+    promptlength = colourless_strlen((saved_rl_state.cooked_prompt ? saved_rl_state.cooked_prompt:  saved_rl_state.raw_prompt), NULL, old_winsize -> ws_col); 
     linelength = (within_line_edit ? strlen(rl_line_buffer) : 0) + promptlength;
     point = (within_line_edit ? rl_point : 0) + promptlength;
+    assert(old_winsize -> ws_col > 0);
     lineheight = (linelength == 0 ? 0 : (1 + (max(point, (linelength - 1)) / old_winsize -> ws_col)));
     if (lineheight > 1 && term_cursor_up != NULL && term_cursor_down != NULL) {
       /* i.e. if we have multiple rows displayed, and we can clean them up first */
@@ -345,9 +347,6 @@ void wipe_textarea(struct winsize *old_winsize)
     cr();
   }
 }       
-
-
-
 
 static void
 child_died(int unused)
@@ -367,14 +366,14 @@ child_died(int unused)
     filter_is_dead = TRUE;
     filter_pid = 0;
   } else  {
-    DPRINTF0(DEBUG_ALL, "Whoa, got a SIGCHLD without one of the children actually dying....!");
+    DPRINTF0(DEBUG_ALL, "Whoa, got a SIGCHLD, but not from slave command or filter! I must have children I don't know about (blush...)!");
     /* ignore */
   }     
 
   errno = saved_errno;  
-  return;                       /* allow remaining output from child to be processed in main loop */
-  /* (so that we will see childs good-bye talk)                     */
-  /* this will then clean up and terminate                          */
+  return;   /* allow remaining output from child to be processed in main loop */
+            /* (so that we will see childs good-bye talk)                     */
+            /* this will then clean up and terminate                          */
 
 }
 
@@ -414,20 +413,19 @@ static int coredump(int status) {
 }
 
 void suicide_by(int signal, int status) {
-  /* Some signals point to a program error. When rlwrap kills itself with one of those,
-     the user will get the impression that rlwrap itself failed. Make clear that
-     it didn't */
+  /* Some signals suggest a program error. When rlwrap kills itself with one of those,
+     the shell may tell the user that rlwrap itself has failed. Make clear that
+     it didn't. @@@ We could also try argv[0] = command_name just before dying ? */
   
-  if (signals_program_error(signal)) { 
-    errno = 0;  
-    mywarn("%s killed by %s%s.\n%s has not crashed, but for transparency,\n"
+  if (signals_program_error(signal)) {  
+    myerror(WARNING|NOERRNO, "%s crashed, killed by %s%s.\n%s itself has not crashed, but for transparency,\n"
            "it will now kill itself %swith the same signal\n",
            command_name, signal_name(signal), (coredump(status) ? " (core dumped)" : ""),
-            program_name, (coredump(status) ? "(without dumping core) " : "") );
+           program_name, (coredump(status) ? "" : "(without dumping core) ") );
   }
   uninstall_signal_handlers();
   unblock_all_signals();
-  set_ulimit(RLIMIT_CORE,0); /* prevent our own useless coredump from clobbering the interesting one created by command */
+  set_ulimit(RLIMIT_CORE,0); /* prevent our own useless core dump from clobbering the interesting one created by command */
   DPRINTF1(DEBUG_SIGNALS, "suicide by signal %s", signal_name(signal));
   kill(getpid(), signal);
   /* still alive? */
@@ -460,7 +458,7 @@ myalarm_was_set = TRUE;
 void
 handle_sigALRM(int signo) {
   received_sigALRM = TRUE;
-  assert(myalarm_was_set == TRUE); /* cry wolf if sigALRM is caught when none was requested by myalarm */
+  assert(myalarm_was_set); /* cry wolf if sigALRM is caught when none was requested by myalarm */
   myalarm_was_set= FALSE;
   DPRINTF0(DEBUG_SIGNALS, "got sigALRM");
 }

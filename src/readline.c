@@ -54,6 +54,7 @@ init_readline(char *prompt)
   rl_add_defun("rlwrap-dump-all-keybindings", dump_all_keybindings,-1);
   rl_add_defun("rlwrap-call-editor", munge_line_in_editor, -1);
 
+  /* rlwrap bindable function names with underscores are deprecated: */
   rl_add_defun("rlwrap_accept_line_and_forget", please_update_alaf,-1);
   rl_add_defun("rlwrap_call_editor", please_update_ce,-1);
   
@@ -142,9 +143,9 @@ restore_rl_state()
   rl_point = saved_rl_state.point;
   saved_rl_state.already_saved = 0;
   DPRINTF0(DEBUG_AD_HOC, "Starting redisplay");
-  rl_redisplay();
+  rl_redisplay(); 
   rl_prep_terminal(1);
-  we_still_have_to_display_the_prompt =  FALSE; /* has been done right now */
+  prompt_is_still_uncooked =  FALSE; /* has been done right now */
 }
 
 static void
@@ -171,7 +172,7 @@ line_handler(char *line)
        the echo.
 
        This is what we do; as a bonus, if the program doesn't echo, e.g. at a password prompt, the **** which has been
-       put there by our homegrown_redisplay function won't be touched.
+       put there by our homegrown_redisplay function will be removed (@@@is this what we want?)
 
        I think this method is more natural for multi-line input as well, (we will actually see our multi-line input as
        multiple lines) but not everyone will agree with that.
@@ -330,7 +331,7 @@ my_homegrown_redisplay(int hide_passwords)
   int skip = max(1, min(width / 5, 10));        /* jumpscroll this many positions when cursor reaches edge of terminal */
   
   char *prompt_without_ignore_markers;
-  int colourless_promptlen = colourless_strlen(rl_prompt, &prompt_without_ignore_markers);
+  int colourless_promptlen = colourless_strlen(rl_prompt, &prompt_without_ignore_markers,0);
   int promptlen = strlen(prompt_without_ignore_markers);
   int invisible_chars_in_prompt = promptlen - colourless_promptlen;
   char *prompt_plus_line = add2strings(prompt_without_ignore_markers, rl_line_buffer);
@@ -414,7 +415,7 @@ my_homegrown_redisplay(int hide_passwords)
   if (line_extends_right)
     new_line[printwidth - 1] = '>';
 
-  DPRINTF0(DEBUG_AD_HOC, "In the middle...");
+  
 
   keep_old_line = FALSE;
   if (term_cursor_hpos) {
@@ -426,8 +427,8 @@ my_homegrown_redisplay(int hide_passwords)
       previous_line = mysavestring(new_line);
     }
   }
-
-
+  /* DPRINTF2(DEBUG_AD_HOC, "keep_old_line=%d, new_line=<%s>", keep_old_line, new_line); */
+  /* keep_old_line = TRUE; */
   if (!keep_old_line) {
     clear_line();
     cr();
@@ -472,46 +473,29 @@ my_redisplay()
 static int
 munge_line_in_editor(int count, int key)
 {
-  int line_number = 0, column_number = 0, tmpfile_OK, ret, tmpfile_fd, bytes_read;
+  int line_number = 0, column_number = 0,  ret, tmpfile_fd, bytes_read;
   size_t tmpfilesize;
-  char *p, *tmpdir, *tmpfilename, *text_to_edit;
+  char *p, *tmpfilename, *text_to_edit;
   char *editor_command1, *editor_command2, *editor_command3, *editor_command4,
     *line_number_as_string, *column_number_as_string;
-  char *input, *rewritten_input, *rewritten_input2, **possible_tmpdirs, **possible_editor_commands;
+  char *input, *rewritten_input, *rewritten_input2,  **possible_editor_commands;
 
 
   if (!multiline_separator)
     return 0;
 
-  possible_tmpdirs = list4(getenv("TMPDIR"), getenv("TMP"), getenv("TEMP"), "/tmp");
-  possible_editor_commands = list4(getenv("RLWRAP_EDITOR"), getenv("EDITOR"), getenv("VISUAL"), "vi +%L");
+  tmpfile_fd = open_unique_tempfile(multi_line_tmpfile_ext, &tmpfilename);
 
-  /* create temporary filename */
-#ifdef HAVE_MKSTEMP
-  tmpdir = first_of(possible_tmpdirs);
-  tmpfilename = add3strings(tmpdir, "/rlwrap_", "XXXXXX");
-  tmpfile_OK = mkstemp(tmpfilename);
-#else
-  tmpfilename = mymalloc(L_tmpnam);
-  tmpfile_OK = (int)tmpnam(tmpfilename); /* manpage says: Never use this function. Use mkstemp(3) instead */
-#endif
-  if (!tmpfile_OK)
-    myerror("could not find unique temporary file name");
-
-  /* write current input to it, replacing the newline substitute (multiline_separator) with the real thing */
-  tmpfile_fd = open(tmpfilename, O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR);
-  if (tmpfile_fd < 0)
-    myerror("could not create temporary file %s", tmpfilename);
   text_to_edit =
     search_and_replace(multiline_separator, "\n", rl_line_buffer, rl_point,
                        &line_number, &column_number);
   write_patiently(tmpfile_fd, text_to_edit, strlen(text_to_edit), "to temporary file");
 
   if (close(tmpfile_fd) != 0) /* improbable */
-    myerror("couldn't close temporary file %s", tmpfilename); 
+    myerror(FATAL|USE_ERRNO, "couldn't close temporary file %s", tmpfilename); 
 
   /* find out which editor command we have to use */
-
+  possible_editor_commands = list4(getenv("RLWRAP_EDITOR"), getenv("EDITOR"), getenv("VISUAL"), "vi +%L");
   editor_command1 = first_of(possible_editor_commands);
   line_number_as_string = as_string(line_number);
   column_number_as_string = as_string(column_number);
@@ -522,21 +506,18 @@ munge_line_in_editor(int count, int key)
     search_and_replace("%C", column_number_as_string, editor_command2, 0,
                        NULL, NULL);
   editor_command4 = add3strings(editor_command3, " ", tmpfilename);
-
-  
-  
   
 
   /* call editor, temporarily restoring terminal settings */    
   if (terminal_settings_saved && (tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved_terminal_settings) < 0))    /* reset terminal */
-    myerror("tcsetattr error on stdin");
+    myerror(FATAL|USE_ERRNO, "tcsetattr error on stdin");
   DPRINTF1(DEBUG_READLINE, "calling %s", editor_command4);
   if ((ret = system(editor_command4))) {
     if (WIFSIGNALED(ret)) {
-      fprintf(stderr, "\n"); errno = 0;
-      myerror("editor killed by signal");
+      fprintf(stderr, "\n"); 
+      myerror(FATAL|NOERRNO, "editor killed by signal");
     } else {    
-      myerror("failed to invoke editor with '%s'", editor_command4);
+      myerror(FATAL|USE_ERRNO, "failed to invoke editor with '%s'", editor_command4);
     }
   }
   completely_mirror_slaves_terminal_settings();
@@ -545,19 +526,18 @@ munge_line_in_editor(int count, int key)
   /* read back edited input, replacing real newline with substitute */
   tmpfile_fd = open(tmpfilename, O_RDONLY);
   if (tmpfile_fd < 0)
-    myerror("could not read temp file %s", tmpfilename);
+    myerror(FATAL|USE_ERRNO, "could not read temp file %s", tmpfilename);
   tmpfilesize = filesize(tmpfilename);
   input = mymalloc(tmpfilesize + 1);
   bytes_read = read(tmpfile_fd, input, tmpfilesize);
   if (bytes_read < 0)
-    myerror("unreadable temp file %s", tmpfilename);
+    myerror(FATAL|USE_ERRNO, "unreadable temp file %s", tmpfilename);
   input[bytes_read] = '\0';
   rewritten_input = search_and_replace("\t", "    ", input, 0, NULL, NULL);     /* rlwrap cannot handle tabs in input lines */
   rewritten_input2 =
-    search_and_replace("\n", multiline_separator, rewritten_input, 0, NULL,
-                       NULL);
+    search_and_replace("\n", multiline_separator, rewritten_input, 0, NULL, NULL);
   for(p = rewritten_input2; *p ;p++)
-    if(*p < ' ')
+    if(*p >= 0 && *p < ' ') /* @@@FIXME: works for UTF8, but not UTF16 or UTF32 (Mention this in manpage?)*/ 
       *p = ' ';        /* replace all control characters (like \r) by spaces */
 
 
@@ -575,7 +555,7 @@ munge_line_in_editor(int count, int key)
 
   /* wash those dishes */
   if (unlink(tmpfilename))
-    myerror("could not delete temporary file %s", tmpfilename);
+    myerror(FATAL|USE_ERRNO, "could not delete temporary file %s", tmpfilename);
   free(editor_command2);
   free(editor_command3);
   free(editor_command4);
@@ -604,7 +584,7 @@ initialise_colour_codes(char *colour)
   
 #define OUTSIDE(lo,hi,val) (val < lo || val > hi) 
   if (OUTSIDE(0,8,attributes) || OUTSIDE(30,37,foreground) || OUTSIDE(40,47,background))
-    myerror("\n"
+    myerror(FATAL|NOERRNO, "\n"
             "  prompt colour spec should be <attr>;<fg>[;<bg>]\n"
             "  where <attr> ranges over [0...8], <fg> over [30...37] and <bg> over [40...47]\n"
             "  example: 0;33 for yellow on current background, 1;31;40 for bold red on black ");
@@ -638,14 +618,16 @@ move_cursor_to_start_of_prompt(int erase)
 {
   int termwidth = winsize.ws_col;
   int promptlen_on_screen, number_of_lines_in_prompt, curpos, count;
-
-
-
-  if (we_still_have_to_display_the_prompt && ! impatient_prompt)
+  int cooked = (saved_rl_state.cooked_prompt != NULL);
+  
+  DPRINTF2(DEBUG_READLINE,"prompt_is_still_uncooked: %d, impatient_prompt: %d", prompt_is_still_uncooked, impatient_prompt);
+  if (prompt_is_still_uncooked && ! impatient_prompt)
     return; /* @@@ is this necessary ?*/
 
-  promptlen_on_screen =  colourless_strlen_unmarked(saved_rl_state.cooked_prompt ? saved_rl_state.cooked_prompt : saved_rl_state.raw_prompt);
-  curpos = (within_line_edit ? 1 : 0); /* if the user has pressed a key the cursor will be 1 past the current prompt */ 
+	
+  promptlen_on_screen =  colourless_strlen_unmarked(saved_rl_state.cooked_prompt ? saved_rl_state.cooked_prompt : saved_rl_state.raw_prompt, termwidth);
+  curpos = (within_line_edit ? 1 : 0); /* if the user has pressed a key the cursor will be 1 past the current prompt */
+  assert(termwidth > 0); 
   number_of_lines_in_prompt = 1 +  ((promptlen_on_screen + curpos -1) / termwidth); /* integer arithmetic! (e.g. 171/80 = 2) */
   cr(); 
   for (count = 0; count < number_of_lines_in_prompt -1; count++) {
@@ -654,7 +636,7 @@ move_cursor_to_start_of_prompt(int erase)
     curs_up();
   } 
   clear_line();
-  DPRINTF4(DEBUG_READLINE,"moved cursor up %d lines (erase = %d, len=%d, termwidth=%d)", number_of_lines_in_prompt - 1, erase, promptlen_on_screen, termwidth); 
+  DPRINTF4(DEBUG_READLINE,"moved cursor up %d lines (erase = %d, len=%d, cooked=%d)", number_of_lines_in_prompt - 1, erase, promptlen_on_screen, cooked); 
 }       
 
 
@@ -721,18 +703,54 @@ char *process_new_output(const char* buffer, struct rl_state* state) {
 
 
 int cook_prompt_if_necessary () {
-  char *pre_cooked, *filtered, *uncoloured;
-  
+  char *pre_cooked, *rubbish_from_alternate_screen,  *filtered, *uncoloured, *cooked, *p, *non_rubbish = NULL;
+  static char **term_ctrl_seqs[] 
+    = {&term_rmcup, &term_rmkx, NULL}; /* (NULL-terminated) list of (pointers to) term control sequences that may be
+                                       used by clients to return from an 'alternate screen'. If we spot one of those,
+                                       assume that it, and anything before it, is rubbish and better left untouched */
+
+  char ***tcptr;
   filtered = NULL;
-  if (saved_rl_state.cooked_prompt)
+
+  DPRINTF2(DEBUG_READLINE, "Prompt <%s>: %s", saved_rl_state.raw_prompt, prompt_is_still_uncooked ? "still raw" : "cooked already");
+
+  if (saved_rl_state.cooked_prompt)    /* if (!prompt_is_still_uncooked) bombs with multi-line paste. Apparently
+                                        prompt_is_still_uncooked can be FALSE while saved_rl_state.cooked_prompt = NULL. Ouch!@@@! */
     return FALSE;  /* cooked already */
+  
   pre_cooked = mysavestring(saved_rl_state.raw_prompt);
-  unbackspace(pre_cooked);
-  if ( (prompt_regexp && ! match_regexp(pre_cooked, prompt_regexp, FALSE)) ||  /* raw prompt doesn't match '--only-cook' regexp */
-       (strcmp((filtered =  pass_through_filter(TAG_PROMPT, pre_cooked)), "_THIS_CANNOT_BE_A_PROMPT_")== 0)) { /* filter has "refused" the prompt */
-    saved_rl_state.cooked_prompt =  (impatient_prompt ? mysavestring(pre_cooked) : mysavestring("")); /* don't cook, eat raw (and eat nothing if patient) */
+
+  
+  for (tcptr = term_ctrl_seqs; *tcptr; tcptr++) { 
+    /* find last occurence of one of term_ctrl_seq */
+    if (**tcptr && (p = mystrstr(pre_cooked, **tcptr))) {
+      p += strlen(**tcptr);  /* p now points 1 char past term control sequence */ 
+      if (p > non_rubbish) 
+        non_rubbish = p; 
+    }   
+  }     
+  /* non_rubbish now points 1 past the last 'alternate screen terminating' control char in prompt */
+  if (non_rubbish) { 
+    rubbish_from_alternate_screen = pre_cooked;
+    pre_cooked = mysavestring(non_rubbish);
+    *non_rubbish = '\0'; /* 0-terminate rubbish_from_alternate_screen */ 
+  } else { 
+    rubbish_from_alternate_screen = mysavestring("");
+  }
+  
+
+  unbackspace(pre_cooked); /* programs that display a running counter would otherwise make rlwrap keep prompts
+                              like " 1%\r 2%\r 3%\ ......" */
+
+  if ( /* raw prompt doesn't match '--only-cook' regexp */
+      (prompt_regexp && ! match_regexp(pre_cooked, prompt_regexp, FALSE)) ||
+       /* now filter it, but filter may "refuse" the prompt */
+      (strcmp((filtered =  pass_through_filter(TAG_PROMPT, pre_cooked)), "_THIS_CANNOT_BE_A_PROMPT_")== 0)) { 
+    /* don't cook, eat raw (and eat nothing if patient) */       
+    saved_rl_state.cooked_prompt =  (impatient_prompt ? mysavestring(pre_cooked) : mysavestring("")); 
+    /* NB: if impatient, the rubbish_from_alternate_screen has been output already, no need to send it again */  
     free(pre_cooked);
-    free(filtered); /* free(NULL) is not an error */
+    free(filtered); /* free(NULL) is never an error */
     return FALSE;
   }     
   free(pre_cooked);
@@ -743,19 +761,25 @@ int cook_prompt_if_necessary () {
     uncoloured = filtered;
   }     
   if (colour_the_prompt) { 
-    saved_rl_state.cooked_prompt =  colourise(uncoloured);
+    cooked =  colourise(uncoloured);
     free(uncoloured);
   } else {
-    saved_rl_state.cooked_prompt = uncoloured;
+    cooked = uncoloured;
   }
+  if (! impatient_prompt)  /* in this case our rubbish hasn't been output yet. Output it now, but don't store
+                              it in the prompt, as this may be re-printed e.g. after resuming a suspended rlwrap */
+                              
+    write_patiently(STDOUT_FILENO,rubbish_from_alternate_screen, strlen(rubbish_from_alternate_screen), "to stdout");
+  saved_rl_state.cooked_prompt = cooked;
   return TRUE;
 }       
+
 
 
 /* Utility functions for binding keys. */
 
 static int please_update(const char *varname) {
-  myerror("since version 0.35, the readline function '%s' is called '%s'\n"
+  myerror(FATAL|NOERRNO, "since version 0.35, the readline function '%s' is called '%s'\n"
           "(hyphens instead of underscores). Please update your .inputrc",
           varname, search_and_replace("_","-", varname, 0, NULL, NULL));
   return 0;
@@ -781,7 +805,7 @@ static int please_update_ce(int count, int key) {
 static Keymap getmap(const char *name) {
   Keymap km = rl_get_keymap_by_name(name);
   if (!km) 
-    myerror("Could not get keymap '%s'", name);
+    myerror(FATAL|NOERRNO, "Could not get keymap '%s'", name);
   return km;
 }
 
@@ -793,7 +817,7 @@ static void bindkey(int key, rl_command_func_t *function, const char *maplist) {
       Keymap kmap = getmap(*mapname);
       DPRINTF4(DEBUG_READLINE,"Binding key %d (%s) in keymap '%s' to <0x%lx>", key, mangle_char_for_debug_log(key,TRUE), *mapname, (long) function);
       if (rl_bind_key_in_map(key, function, kmap))
-        myerror("Could not bind key %d (%s) in keymap '%s'", key, mangle_char_for_debug_log(key,TRUE), *mapname);
+        myerror(FATAL|NOERRNO, "Could not bind key %d (%s) in keymap '%s'", key, mangle_char_for_debug_log(key,TRUE), *mapname);
     }
 }       
 

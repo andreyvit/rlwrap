@@ -1,4 +1,4 @@
-
+#!/usr/bin/env perl
 
 # You can use this test program to grill rlwrap - I wrote it in perl because I'm lazy
 
@@ -48,13 +48,15 @@ while(1) {
   (/^:e\s*([+-]?\d+)?/) and exit ($1 || 0);
   /^:f/ and do_fork();
   /^:h/ and help();
+  /^:H/ and hanky_panky();
   /^:l/ and long_and_difficult_string();
   /^:p/ and pass();
-  /^:P/ and print_chunky(`cat $0`);
+  /^:P/ and print_chunky(scalar `cat $0`);
   /^:r/ and reset_prompt();
   /^:R/ and raw();
   /^:s/ and segfault();
   /^:t/ and trickle();
+  /^:S/ and trickle2();
   /^:u/ and utf8();
   /^:T/ and test_controlling_terminal();
   /^:v/ and toggle_verbosity();
@@ -100,11 +102,14 @@ client does things like:
 :e [N] exit (with error code N)
 :f fork and let child take over (parent waits)
 :h help
+:H hanky-panky with backspace and carriage return
 :l print a long and difficult text
 :p ask "passsword"
 :P print chunky
 :r reset prompt
 :R raw mode (char-at-a-time)
+:s and sefgault
+:S and trickle slowly
 :t trickle output (10 chars)
 :T test controlling terminal
 :u try some utf-8
@@ -188,6 +193,26 @@ sub trickle {
   show_input($input);
 }
 
+sub trickle2 {
+  local $prompting;
+  my $i;
+  foreach my $c (split //, "trickle, trackle > ") {
+    print $c;
+    sleep 1;
+  }
+  my $input = <>;
+  show_input($input);
+}
+
+sub hanky_panky {
+  for (my $i = 99; $i > 95 ; $i--) {
+    print "$i bottles of beer on the wall, $i bottles of beef";
+    sleep 1; print "\br";
+    sleep 1; print "\r";
+  }
+  print "\nYawn!\n"
+}
+    
 
 sub countdown {
   local $prompting;
@@ -255,8 +280,8 @@ sub kleur {
 }
 
 sub long_and_difficult_string {
-  my $text = (red("hot") . " and ". blue("cold"). ", ") x 1000;
-  print "$text\n$text\n$text\n";
+  my $text = (red("hot") . " and ". blue("cold"). ", ") x 3000;
+  print "$text\n";
 }
 
 sub reset_prompt {
@@ -315,7 +340,9 @@ sub print_chunky {
   my ($text) = @_;
   local $| = undef;
   while ($text) {
-    print (substr($text, 0, int(rand(20)), ""));
+    syswrite STDOUT, substr($text, 0, int(rand(20)), "");
+    select(undef, undef, undef, 0.01);
+
   }
 }
   

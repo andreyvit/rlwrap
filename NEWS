@@ -1,9 +1,73 @@
+0.41  Slightly late SIGCHLD could cause an I/O error on master pty
+
+      Added -W (-polling) option to poll slave pty for changes in its 
+      interrupt character and ISIG flag.
+
+      if $TERM is not found in termcap/terminfo database, use vt100
+
+0.40  configure will now find tgetent() in libtinfo 
+
+      compiling with gcc -O2 made rlwrap hang after CTRL-D on empty line
+      
+      HP-UX 11 has weird tgetent() return values, confusing rlwrap 
+
+      On Solaris, rlwrap would sometimes fail with "TIOCSWINSZ failed on 
+      slave pty"
+   
+      Single quote ' is now word-breaking by default 
+
+      multi-line edit would mangle upper ASCII and UTF-8 (and still does 
+      that to UTF16 :( ) 
+
+      added --extra-char-after-completion and -multi-line-ext options
+
+      rlwrap now recognises the 'rmcup' and 'rmkx' character sequences used by 
+      programs that use an alternate screen (like editors and pagers) to return 
+      from it.
+      
+      configure will now correctly determine pty type on SCO OpenServer
+
+      rlwrap --no-children would leak file descriptors to /proc/<command_pid>/wchan
+      
+      non-ASCII characters in multi-line input are no longer replaced
+      by spaces after calling an external editor
+  
+      running rlwrap within emacs would crash (division by zero). 
+      rlwrap now bails out whenever terminal width == 0
+
+      added --enable-proc-mountpoint config option to use alternate linux-like 
+      proc filesystems (like in FreeBSD) for finding <command>s working dir (-c option)
+      and kernel function in which <command> is sleeping (-N option)
+
+      added prototype for copy_without_ignore_markers, fixing a segfault on NetBSD/amd64
+      
+      commands final output before dying was lost on FreeBSD
+
+      Filters now get complete echo lines even if the echo comes back in chunks
+
+
+0.37  Commands that emit "status lines" using backspaces and carriage 
+      returns could confuse rlwrap
+
+      removed test program kaboom.c that triggered an internal
+      gcc error on armel platforms.
+
+      rlwrap uses C strings internally, and thus cannot cope with
+      command output that contains zero bytes (padding). It used to
+      replace these with spaces, now the zero bytes are removed.
+
+      if the RLWRAP_HOME is set, but $RLWRAP_HOME doesn't exist, rlwrap
+      will create it
+
+      typo: SIGERR instead of SIG_ERR in signals.c
+      
 0.36  Entering a line from vi command mode would echo the input twice 
 
       Output from very busy commands would not always be printed on time
 
       When rlwrap kills itself after a command crash it will not dump 
-      core, in order to avoid clobbering command's core dump.
+      core, in order to avoid clobbering command's much more interesting 
+      core dump.
 
       Premature filter death is now reported properly (it used to only 
       say: "EOF reading from filter" or "Broken pipe writing to filter") 

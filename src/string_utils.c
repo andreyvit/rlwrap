@@ -113,6 +113,10 @@ add3strings(const char *str1, const char *str2, const char *str3)
 }
 
 
+/* append_and_free_old(str1, str2): return add2strings(str1, str2), freeing str1 
+   append_and_free_old(NULL, str) just returns a copy of  str
+*/ 
+
 char *
 append_and_free_old(char *str1, const char *str2)
 {
@@ -156,7 +160,9 @@ mydirname(char *filename)
 
 
 /* mystrtok: saner version of strtok that doesn't overwrite its first argument */
-char *mystrtok(const char *s, const char *delim) {
+
+char *
+mystrtok(const char *s, const char *delim) {
   static char *scratchpad = NULL;
   if (s) {
     if (scratchpad)
@@ -167,7 +173,9 @@ char *mystrtok(const char *s, const char *delim) {
 }       
 
 /* split_with("a bee    cee"," ") returns a pointer to an array {"a", "bee",  "cee", NULL} on the heap */
-char **split_with(const char *string, const char *delim) {
+
+char **
+split_with(const char *string, const char *delim) {
   const char *s;
   char *token, **pword;
   char **list = mymalloc(1 + strlen(string) * sizeof(char **)); /* list can never be longer than string + 1 */ 
@@ -176,6 +184,18 @@ char **split_with(const char *string, const char *delim) {
   *pword = NULL;
   return list;
 }       
+
+/* unsplit_with(3, ["a", "bee", "cee"], "; ") returns a pointer to "a; bee; cee" on the heap */
+char *
+unsplit_with(int n, char **strings, const char *delim) {
+  int i;
+  char *result = mysavestring(n> 0 ? strings[0]: "");
+  for (i = 1; i < n; i++) { 
+       result = append_and_free_old(result, delim);
+       result = append_and_free_old(result, strings[i]);
+  }
+  return result;
+}
 
 /* split_with("a\t\tbla","\t") returns {"a" "bla", NULL}, but we want {"a", "", "bla", NULL} for filter completion.
    We write a special version (can be freed with free_splitlist) */
@@ -396,34 +416,95 @@ list4 (char *el0, char *el1, char *el2, char *el3)
 }
 
 
+/* remove_padding_and_terminate(buf, N) overwrites buf with a copy of
+   its first N bytes, omitting any zero bytes, and then terminates the
+   result with a final zero byte.  Example: if buf="a\0b\0\0cde@#!" then,
+   after calling remove_padding_and_terminate(buf, 8) buf will contain
+   "abcde\0de@#!"
+
+   We need to call this function on everything we get from the
+   inferior command because (out of sheer programmer laziness) rlwrap
+   uses C strings internally. Zero bytes are only ever used as padding
+   (@@@is this true?), and padding is not used anymore on modern
+   terminals. (except maybe for things like the visual bell) */
+ 
+
+void remove_padding_and_terminate(char *buf, int length) {
+  char *readptr, *copyptr;
+
+  for (readptr = copyptr = buf; readptr < buf + length; readptr++) {
+    if (*readptr != '\0')
+      *copyptr++ = *readptr;
+  }
+  *copyptr = '\0';
+  if (debug && strlen(buf) != length)
+    DPRINTF2(DEBUG_TERMIO, "removed %d zero bytes (padding?) from %s", length - (int) strlen(buf), mangle_string_for_debug_log(buf, MANGLE_LENGTH));
+}       
         
-char ESCAPE = '\033';
-char BACKSPACE = '\010';
-char CARRIAGE_RETURN = '\015';
+#define ESCAPE  '\033'
+#define BACKSPACE '\010'
+#define CARRIAGE_RETURN  '\015'
 
 /* unbackspace(&buf) will overwrite buf (up to and including the first
    '\0') with a copy of itself. Backspaces will move the "copy
    pointer" one backwards, carriage returns will re-set it to the
    begining of buf.  Because the re-written string is always shorter
-   than the original, we need not worry about writing outside buf */
+   than the original, we need not worry about writing outside buf
+
+   Example: if buf="abc\bd\r\e" then, after calling unbackspace(buf),
+   buf will contain "ebd"
+
+   We need this function because many commands emit "status lines"
+   using backspaces and carriage returns to re-write parts of the line in-place.
+   Rlwrap will consider such lines as "prompts" (@@@myabe it shouldn't?)
+   but mayhem results if we feed the \b and \r characters to readline
+*/
 
 void
 unbackspace(char* buf) {
-  char *p, *q;  
-  for(p = q = buf; *p; p++)  {
-    if (*p == BACKSPACE)
-      q = (q > buf ? q - 1 : q);
-    else if (*p == CARRIAGE_RETURN)
-      q = buf; 
-    else {
-      assert (q <= p);
-      assert (q >= buf);        
-      *q++ = *p;
+  char *readptr, *copyptr, *endptr;
+  int seen_bs_or_cr;
+
+  DPRINTF1(DEBUG_TERMIO,"unbackspace: %s", mangle_string_for_debug_log(buf, MANGLE_LENGTH));
+  seen_bs_or_cr = FALSE;
+  
+  for (readptr = copyptr = endptr = buf; *readptr; readptr++) {
+
+    assert(endptr <= readptr);
+    assert(copyptr <= endptr);
+
+    switch (*readptr) {
+    case BACKSPACE:
+      copyptr = (copyptr > buf ? copyptr - 1 : buf);  /* cannot backspace past beginning of buf */
+      seen_bs_or_cr = TRUE;
+      break;
+    case CARRIAGE_RETURN:
+      copyptr = buf;  
+      seen_bs_or_cr = TRUE;
+      break;
+    default:
+      *copyptr++ = *readptr;      
+      break;
     }
+    if (copyptr > endptr)
+      endptr = copyptr;
   }
-  *q = '\0';
+  *endptr = '\0';
+  if (seen_bs_or_cr) 
+      DPRINTF1(DEBUG_TERMIO,"unbackspace result: %s", mangle_string_for_debug_log(buf, MANGLE_LENGTH));
+  
 }
 
+
+void test_unbackspace (const char *input, const char *expected_result) {
+  char *scrap = mysavestring(input);
+  unbackspace(scrap);
+  if (strcmp(scrap, expected_result) != 0)
+    myerror(FATAL|NOERRNO, "unbackspace %s yielded %s, expected %s",
+              mangle_string_for_debug_log(input,0),
+              mangle_string_for_debug_log(scrap,0),
+              expected_result);
+}
 
 
 /* Readline allows to single out character sequences that take up no
@@ -449,7 +530,7 @@ unbackspace(char* buf) {
 
 
 /* TODO @@@ replace the following obscure and unsafe functions using the regex library */
-static void  match_and_copy_ESC_sequence (const char **original, char **copy);
+static void  copy_ordinary_char_or_ESC_sequence(const char **original, char **copy);
 static void match_and_copy(const char *charlist, const char **original, char **copy);
 static int matches (const char *charlist, char c) ;
 static void copy_next(int n, const char **original, char **copy);
@@ -457,7 +538,7 @@ static void copy_next(int n, const char **original, char **copy);
 char *
 mark_invisible(const char *buf)
 {
-  int padsize = 3 * strlen(buf) + 1; /* worst case: every char in buf gets surrounded by RL_PROMPT_{START,END}_IGNORE */
+  int padsize =  (assert(buf != NULL), (3 * strlen(buf) + 1)); /* worst case: every char in buf gets surrounded by RL_PROMPT_{START,END}_IGNORE */
   char *scratchpad = mymalloc (padsize);
   char *result = scratchpad;
   const char **original = &buf;
@@ -467,10 +548,7 @@ mark_invisible(const char *buf)
     return mysavestring(buf); /* "invisible" parts already marked */
     
   while (**original) {
-    /* printf ("orig: %p, copy: %p, result: %s @ %p\n", *original, *copy, result, result); */
-    match_and_copy_ESC_sequence(original, copy);
-    /* match_and_copy_unprintable(original, copy); */
-    copy_next(1, original, copy);
+    copy_ordinary_char_or_ESC_sequence(original, copy); 
     assert(*copy - scratchpad < padsize);
   }
   **copy = '\0';
@@ -481,10 +559,12 @@ mark_invisible(const char *buf)
 
 
 static void
-match_and_copy_ESC_sequence (const char **original, char **copy)
+copy_ordinary_char_or_ESC_sequence (const char **original, char **copy)
 {
-  if (**original != ESCAPE || ! matches ("[]", *(*original + 1)))
+  if (**original != ESCAPE || ! matches ("[]", *(*original + 1))) {
+    copy_next(1, original, copy);
     return;       /* not an ESC[ sequence */
+  }
   *(*copy)++ = RL_PROMPT_START_IGNORE;
   copy_next(2, original, copy);
   match_and_copy(";0123456789", original, copy);
@@ -521,26 +601,6 @@ copy_next(int n, const char **original, char **copy)
 
 
 
-char *
-copy_and_unbackspace(const char *original)
-{
-  char *copy = mysavestring(original);
-#if 0  
-  char *copy_start = copy;
-  for( ; *original; original++) {
-    if(*original == BACKSPACE)
-      copy = (copy > copy_start ? copy - 1 : copy_start);
-    else if (*original == CARRIAGE_RETURN)
-      copy = copy_start;
-    else
-      *copy++ = *original;
-  }     
-  *copy = '\0';
-  return copystart;
-#else
-  return copy;
-#endif
-}
   
 
 /* helper function: returns the number of displayed characters (the
@@ -551,38 +611,68 @@ copy_and_unbackspace(const char *original)
 */
 
 int
-colourless_strlen(const char *str, char **copy_without_ignore_markers)
+colourless_strlen(const char *str, char **pcopy_without_ignore_markers, int termwidth)
 {
-  int counting = TRUE, count = 0;
-  const char *p;
-  char *q =  NULL; 
-  if (copy_without_ignore_markers) 
-    q = *copy_without_ignore_markers = mymalloc(strlen(str)+1);
-    
+  int visible = TRUE;
+  int column = 0;
+  int length = strlen(str);
+  const char *p; 
+  char *q, *copy_without_ignore_markers;
+  
+
+  assert(termwidth >= 0);
+  q = copy_without_ignore_markers = mymalloc(length + 1);
+	
   for(p = str; *p; p++) {
+    assert (q < copy_without_ignore_markers + length); 
     switch (*p) {
     case RL_PROMPT_START_IGNORE:
-      counting = FALSE;
+      visible = FALSE;
       continue;
     case RL_PROMPT_END_IGNORE:
-      counting = TRUE;
+      visible = TRUE;
       continue;
+    case '\r':
+      if (visible) {
+        q -= column;
+        column = 0;
+        continue;
+      }
+      break;
+    case '\b':
+      if ((visible && q > copy_without_ignore_markers)) {
+        q -= 1;
+        column -= 1;
+        if (termwidth && column < 0) 
+          column += termwidth;
+        continue;
+      }
+      break;
     }   
-    
-    count += (counting ? 1 : 0);
-    if (copy_without_ignore_markers)
+    if (visible) {
       *q++ = *p;
-  }
-  if (copy_without_ignore_markers)
-    *q = '\0';
-  return count;
+      column +=1;
+      if (termwidth && column >= termwidth)
+        column -= termwidth;
+    }
+  } 
+  *q = '\0';
+  DPRINTF4(DEBUG_READLINE, "colourless_strlen(\"%s\", 0x%lx, %d) = %ld",
+           mangle_string_for_debug_log(str, MANGLE_LENGTH), (long) pcopy_without_ignore_markers,
+           termwidth,  q - copy_without_ignore_markers);  
+  if (pcopy_without_ignore_markers)
+    *pcopy_without_ignore_markers = copy_without_ignore_markers;
+  else
+    free (copy_without_ignore_markers);
+
+  return q - copy_without_ignore_markers;
 }
 
 int
-colourless_strlen_unmarked (const char *str)
+colourless_strlen_unmarked (const char *str, int termwidth)
 {
   char *marked_str = mark_invisible(str);
-  int colourless_length = colourless_strlen(marked_str, NULL);
+  int colourless_length = colourless_strlen(marked_str, NULL, termwidth);
   free(marked_str);
   return colourless_length;
 }
@@ -601,7 +691,7 @@ get_last_screenline(char *long_line, int termwidth)
   int line_length, removed;
   char *line_copy, *last_screenline;
 
-  line_copy = copy_and_unbackspace(long_line);
+  line_copy = mysavestring(long_line);
   line_length = strlen(line_copy);
   
   if (termwidth == 0 ||              /* this may be the case on some weird systems */
@@ -655,7 +745,7 @@ colour_name_to_ansi_code(const char *colour_name) {
     if (colour_code)
       return add3strings(bold_code,";",colour_code);
     else
-      myerror("unrecognised colour name '%s'. Use e.g. 'yellow' or 'Blue'.", colour_name);
+      myerror(FATAL|NOERRNO, "unrecognised colour name '%s'. Use e.g. 'yellow' or 'Blue'.", colour_name);
   }
   return mysavestring(colour_name);
 }       
@@ -688,7 +778,7 @@ int match_regexp (const char *string, const char *regexp, int case_insensitive) 
     char *lc_regexp = (case_insensitive  ? lowercase(regexp) : mysavestring(regexp));
 
     if (scan_metacharacters(regexp, metachars) && !been_warned++) /* warn only once if the user specifies a metacharacter */
-      mywarn("one of the regexp metacharacters \"%s\" occurs in regexp(?) \"%s\"\n"
+      myerror(WARNING|NOERRNO, "one of the regexp metacharacters \"%s\" occurs in regexp(?) \"%s\"\n"
              "  ...but on your platform, regexp matching is not supported!", metachars, regexp);        
     
     result = mystrstr(lc_string, lc_regexp);
@@ -704,7 +794,7 @@ int match_regexp (const char *string, const char *regexp, int case_insensitive) 
       int size = regerror(compile_error, compiled_regexp, NULL, 0);
       char *error_message =  mymalloc(size);
       regerror(compile_error, compiled_regexp, error_message, size);
-      errno=0; myerror("in regexp \"%s\": %s", regexp, error_message);  
+      myerror(FATAL|NOERRNO, "in regexp \"%s\": %s", regexp, error_message);  
     } else {
       result = !regexec(compiled_regexp, string, 0, NULL, 0);
       free(compiled_regexp);
