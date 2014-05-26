@@ -23,19 +23,18 @@ dnl  Boston, MA 02111-1307, USA.
 
 
 
-AC_INIT
+AC_INIT(rlwrap,0.41)
 
 AC_PREREQ(2.61)
-
 
 
 AC_CONFIG_AUX_DIR(tools)
 AC_CANONICAL_HOST
 AC_CONFIG_SRCDIR(src/main.c)
-AM_INIT_AUTOMAKE(rlwrap,0.36)
+AM_INIT_AUTOMAKE
 
 AC_PROG_INSTALL
-AM_CONFIG_HEADER([config.h])
+AC_CONFIG_HEADERS([config.h])
 AC_PROG_MAKE_SET
 AM_SANITY_CHECK
 
@@ -44,6 +43,7 @@ AM_SANITY_CHECK
 opt_debug=no
 opt_homegrown_redisplay=no
 opt_spy_on_readline=yes
+opt_proc_mountpoint=/proc
 
 AC_ARG_ENABLE(debug,
     AC_HELP_STRING([--enable-debug], [enable debugging [[default=NO]]]),
@@ -58,11 +58,16 @@ AC_ARG_ENABLE(spy-on-readline,
 	[use private readline variable to keep screen tidy when resizing terminal [[default=YES]]]),
     opt_spy_on_readline=$enableval)
 
+AC_ARG_ENABLE(proc-mountpoint,                                                                                                                    
+     AC_HELP_STRING([--enable-proc-mountpoint [[default=/proc]]],                                                                                  
+       [specify mountpoint for Linux-style procfs (used for determination of command's PWD) [[default=/proc]]]), # '                               
+     opt_proc_mountpoint=$enableval) 
+
 
 if test $opt_debug = yes; then
     AC_DEFINE(DEBUG,1 ,Define to 1 to get debugging info)
     test -z "$CFLAGS" || AC_MSG_WARN([Because CFLAGS is set, configure will not add -g and -Wall to them - do it yourself if necessary])
-    test -z "$CFLAGS" && AC_SUBST(CFLAGS,"-O0 -g -pedantic -Wall") # compile for debugging, and  give plenty of warnings
+    test -z "$CFLAGS" && AC_SUBST(CFLAGS,"-O0 -g -Wimplicit-function-declaration -Wimplicit -pedantic -Wall") # compile for debugging, and  give plenty of warnings
 
 
 fi
@@ -163,7 +168,7 @@ AC_TYPE_SIGNAL
 # Let groff -Tman know whether we have long options
 AC_CHECK_FUNC([getopt_long], [AC_SUBST(HAVE_LONG_OPTS,[yes])],[AC_SUBST(HAVE_LONG_OPTS,[no])])
 
-AC_CHECK_FUNCS(getopt_long isastream  mkstemp pselect putenv readlink sched_yield )
+AC_CHECK_FUNCS(getopt_long isastream  mkstemps pselect putenv readlink sched_yield )
 AC_CHECK_FUNCS(setenv setitimer setsid setrlimit sigaction snprintf strlcpy strlcat strnlen system)
 
 # Try to determine the kind of pty support on this system
@@ -200,8 +205,8 @@ AC_CACHE_CHECK(for pty/tty type, ptyttylib_cv_ptys,
     AC_CHECK_HEADERS([pty.h])    
  else if test x$ac_cv_func__getpty = xyes; then
     ptyttylib_cv_ptys=SGI4
- else if test -c /dev/ttyp20; then
-    ptyttylib_cv_ptys=SCO
+ else if test -c /dev/ttyp20 -a ! -c /dev/ptmx; then 
+   ptyttylib_cv_ptys=SCO
  else if test -c /dev/ptym/clone; then
     ptyttylib_cv_ptys=HPUX
  else if test x$ptyttylib_cv_func_getpt = xyes; then
@@ -214,7 +219,7 @@ AC_CACHE_CHECK(for pty/tty type, ptyttylib_cv_ptys,
     ptyttylib_cv_ptys=STREAMS
  else case "$host_os" in
          *cygwin*) ptyttylib_cv_ptys=STREAMS ;;
-         *)        ptyttylib_cv_ptys=BSD ;;
+         *)        ptyttylib_cv_ptys=PREHISTORIC ;;
       esac
 fi
 fi
@@ -250,7 +255,7 @@ fi
 if test x$ptyttylib_cv_ptys = xHPUX; then
   AC_DEFINE(PTYS_ARE_CLONE, 1, Define for this pty type)
 fi
-if test x$ptyttylib_cv_ptys = xBSD -o x$ptyttylib_cv_ptys = xHPUX -o x$ptyttylib_cv_ptys = xGLIBC; then
+if test x$ptyttylib_cv_ptys = xPREHISTORIC -o x$ptyttylib_cv_ptys = xHPUX -o x$ptyttylib_cv_ptys = xGLIBC; then
   AC_DEFINE(PTYS_ARE_SEARCHED, 1, Define for this pty type)
 fi
 
@@ -273,27 +278,36 @@ fi
 
 AC_CHECK_FUNC(tgetent,
    [READLINE_SUPPLIB=],
-   [AC_CHECK_LIB(curses, tgetent,
-      [READLINE_SUPPLIB=-lcurses],
-      [AC_CHECK_LIB(ncurses, tgetent,
-         [READLINE_SUPPLIB=-lncurses],
-         [AC_CHECK_LIB(termcap, tgetent,
-            [READLINE_SUPPLIB=-ltermcap],
-            [AC_MSG_WARN(No termcap nor curses library found)])
+     [AC_CHECK_LIB(tinfo, tgetent,
+     [READLINE_SUPPLIB=-ltinfo],
+       [AC_CHECK_LIB(curses, tgetent,
+         [READLINE_SUPPLIB=-lcurses],
+         [AC_CHECK_LIB(ncurses, tgetent,
+            [READLINE_SUPPLIB=-lncurses],
+            [AC_CHECK_LIB(termcap, tgetent,
+               [READLINE_SUPPLIB=-ltermcap],
+               [AC_MSG_WARN(No termcap nor curses library found)])
+            ])
          ])
       ])
    ])
 
 
+
+
 AC_CHECK_LIB(readline,readline,[READLINELIB=-lreadline],
 	AC_MSG_ERROR([
-
 You need the GNU readline library(ftp://ftp.gnu.org/gnu/readline/ ) to build
 this program!
-
 ]), [$READLINE_SUPPLIB])
 
 LIBS="$LIBS $READLINELIB $READLINE_SUPPLIB"
+
+AC_CHECK_FUNCS(tigetnum)
+
+
+
+AC_CHECK_HEADER([readline/readline.h],[],AC_MSG_ERROR([readline.h not found - you may need to install a readline development package]))
 
 AC_MSG_CHECKING(whether your readline headers know about rl_set_screen_size)
 AC_EGREP_HEADER([rl_set_screen_size],[readline/readline.h], true , 
@@ -324,20 +338,22 @@ AC_MSG_RESULT(yes)
 
 
 
-# check for existence of myself under /proc/$$/cwd
-echo "Will rlwrap find command's working directory under /proc/<commands pid>/cwd? let's see..."
-AC_CHECK_FILES(/proc/$$/cwd/configure.ac,[
-                  AC_DEFINE(HAVE_PROC_PID_CWD,1 ,[Define to 1 if /proc/<pid>/cwd is a link to working directory of process <pid>])
-                  AC_SUBST(HAVE_PROC_PID_CWD,[yes])
-               ],[AC_SUBST(HAVE_PROC_PID_CWD,[no])])
+# check for existence of myself under $opt_proc_mountpoint/$$/cwd If the user specified --disable-proc-mountpoint we'll still do these tests
+# but they wil fail unless /no is a procfs mountpoint ;-)
+
+echo "Will rlwrap find command's working directory under ${opt_proc_mountpoint}/<commands pid>/cwd? let's see..."                                 
+AC_CHECK_FILES($opt_proc_mountpoint/$$/cwd/configure.ac,[                                                                                      
+                 AC_DEFINE(HAVE_PROC_PID_CWD, 1 ,[Define to 1 if <opt_proc_mountpoint>/<pid>/cwd is a link to working directory of process <pid>]) 
+                 AC_SUBST(HAVE_PROC_PID_CWD,[yes])
+              ],[AC_SUBST(HAVE_PROC_PID_CWD,[no])])
+
+
+
+AC_DEFINE_UNQUOTED(PROC_MOUNTPOINT, "[$opt_proc_mountpoint]", [Define to location of Linux-style procfs mountpoint if provided and valid])
 
 
 echo
 echo
-
-#echo "please ignore any WARNINGs about ignoring --datarootdir below :-)"
-#echo
-#echo
 
 
 AC_OUTPUT
@@ -353,6 +369,6 @@ EOF
 
 
 # Local Variables:
-# mode: shell-script
+# mode: autoconf
 # End:
 

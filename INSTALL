@@ -10,32 +10,37 @@ INSTALLATION
 
 ./configure
 make
-make install 
+make install
+
 
 CONFIGURATION OPTIONS
 
 configure can be called with a number of options (e.g. if you want to
-install rlwrap in a non-standard place). Do 
+install rlwrap in a non-standard place). Do
 
 ./configure --help
 
 to see them all. Most of them are not specific to rlwrap, except the
-following three:
+following:
 
---enable-spy-on-readline : If we want to keep the display tidy when
-re-sizing the terminal window or printing multi-line prompts, we have
-to know whether or not readline is in horizontal-scroll-mode
-(i.e. wheter long lines are scrolled or wrapped). At present, this
-involves a look at a private readline variable - if you feel guilty
-about that, disable this option.
+--enable-spy-on-readline (default: YES) If we want to keep the display
+  tidy when re-sizing the terminal window or printing multi-line
+  prompts, we have to know whether or not readline is in
+  horizontal-scroll-mode (i.e. wheter long lines are scrolled or
+  wrapped). At present, this involves a look at a private readline
+  variable - if you feel guilty about that, disable this option.
 
---enable-homegrown-redisplay: some people report ddouble echoing of
-user input. Enabling this option will cure the problem - though the
-display will then flicker over slow connections (cf. BUGS)
+--enable-homegrown-redisplay (default: NO): some people report ddouble
+  echoing of user input. Enabling this option will cure the problem -
+  though the display will then flicker over slow connections
+  (cf. BUGS)
 
---enable-debug: Adds a --debug option to rlwrap's repertoire. This
-will make rlwrap write debug information to a file /tmp/rlwrap.debug
-(cf. the output of rlwrap --help for more info)
+--enable-debug: (default: NO) Adds a --debug option to rlwrap's
+  repertoire. This will make rlwrap write debug information to a file
+  /tmp/rlwrap.debug (cf. the output of rlwrap --help for more info)
+
+--enable-proc-mountpoint (default: /proc) mountpoint for Linux-style
+  procfs, used for determination of slave command's working directory.
 
 
 UNINSTALLATION
@@ -44,20 +49,57 @@ To uninstall, do 'make uninstall'
 
 INSTALLING AS NON-ROOT
 
-If you want to install rlwrap as non-root, you should call configure with 
+If you want to install rlwrap as non-root, you should call configure with
 the --prefix option, like:
 
-./configure --prefix=$HOME 
+./configure --prefix=$HOME
 
 after which 'make install' will install rlwrap in $HOME/bin
 
-You may have to install GNU readline  (e.g using ./configure
+You may have to install GNU readline (e.g using ./configure
 --prefix=$HOME in the readline source directory)
 
 rlwrap's configure script will not find this installation automatically, but
 
-./configure --prefix=$HOME CFLAGS=-I$HOME/include CPPFLAGS=-I$HOME/include LDFLAGS=-L$HOME/lib 
+./configure --prefix=$HOME CFLAGS=-I$HOME/include CPPFLAGS=-I$HOME/include LDFLAGS=-L$HOME/lib
 
 should work. You can add '-static' to LDFLAGS if you want to build a statically linked rlwrap.
 
+
+BUILD PROBLEMS
+
+If configure complains about missing Xyz (where Xyz can be ncurses, or
+readline) and you are sure that Xyz is installed on your system,
+consider installing Xyz-devel
+
+completion.c is made from completion.rb by the program rbgen
+(http://libredblack.sourceforge.net/) Sometimes, after a 'git pull',
+make will try to recompile completion.rb and complain about not
+finding rbgen. A fresh clone, or simply 'touch completion.c' will
+solve this.
+
+If the configure script is not found, you can recreate it, and all of
+the other files it needs, by:
+
+aclocal
+autoconf
+autoheader
+automake --add-missing
+
+or, even shorter:
+
+autoreconf --install
+
+On recent OS X sytems, libreadline is not the real thing, but a
+non-GNU replacement. If the linker complains about missing
+symbols, install GNU readline and try again (or, better, use
+a tool like brew)
+
+Even though rlwrap now uses the excellent pseudo-terminal (pty)
+handling code from rxvt, portable programming with ptys is something
+of a black art. The configure script tries to guess how ptys have to
+be created and handled on your system, but it may guess wrong. To
+quote rxvt's configure script: "if we don't guess right then it's up
+to the user", which means that you have to manually edit config.h, and
+save a copy of it somewhere, as configure will re-create config.h
 

@@ -108,13 +108,11 @@ char *strchr(), *strrchr();
 #endif
 
 
-#ifdef HAVE_PTY_H
+#ifdef HAVE_PTY_H /* glibc (even if BSD) */
 #  include <pty.h>
-#endif
-#ifdef HAVE_LIBUTIL_H
+#elif HAVE_LIBUTIL_H /* BSD, non-glibc */
 #  include <libutil.h>
-#endif
-#ifdef HAVE_UTIL_H
+#elif HAVE_UTIL_H /* BSD, other varriants */
 #  include <util.h>
 #endif
 
@@ -129,14 +127,23 @@ char *strchr(), *strrchr();
 
 
 #ifdef  HAVE_SNPRINTF           /* don't rely on the compiler understanding variadic macros */
-# define snprintf0(buf,bufsize,format)                  snprintf(buf,bufsize,format)
-# define snprintf1(buf,bufsize,format,arg1)             snprintf(buf,bufsize,format,arg1)
-# define snprintf2(buf,bufsize,format,arg1,arg2)        snprintf(buf,bufsize,format,arg1,arg2)
+# define snprintf0(buf,bufsize,format)                           snprintf(buf,bufsize,format)
+# define snprintf1(buf,bufsize,format,arg1)                      snprintf(buf,bufsize,format,arg1)
+# define snprintf2(buf,bufsize,format,arg1,arg2)                 snprintf(buf,bufsize,format,arg1,arg2)
+# define snprintf3(buf,bufsize,format,arg1,arg2,arg3)            snprintf(buf,bufsize,format,arg1,arg2,arg3)
+# define snprintf4(buf,bufsize,format,arg1,arg2,arg3,arg4)       snprintf(buf,bufsize,format,arg1,arg2,arg3,arg4)
+# define snprintf5(buf,bufsize,format,arg1,arg2,arg3,arg4,arg5)  snprintf(buf,bufsize,format,arg1,arg2,arg3,arg4,arg5)
+# define snprintf6(buf,bufsize,format,arg1,arg2,arg3,arg4,arg5,arg6)  snprintf(buf,bufsize,format,arg1,arg2,arg3,arg4,arg5,arg6)
+
 #else
-# define snprintf0(buf,bufsize,format)                  sprintf(buf,format)
-# define snprintf1(buf,bufsize,format,arg1)             sprintf(buf,format,arg1)
-# define snprintf2(buf,bufsize,format,arg1,arg2)        sprintf(buf,format,arg1,arg2)
-# define vsnprintf(buf,bufsize,format,ap)               vsprintf(buf,format,ap)
+# define snprintf0(buf,bufsize,format)                           sprintf(buf,format)
+# define snprintf1(buf,bufsize,format,arg1)                      sprintf(buf,format,arg1)
+# define snprintf2(buf,bufsize,format,arg1,arg2)                 sprintf(buf,format,arg1,arg2)
+# define snprintf3(buf,bufsize,format,arg1,arg2,arg3)            sprintf(buf,format,arg1,arg2,arg3)
+# define snprintf4(buf,bufsize,format,arg1,arg2,arg3,arg4)       sprintf(buf,format,arg1,arg2,arg3,arg4)
+# define snprintf5(buf,bufsize,format,arg1,arg2,arg3,arg4,arg5)  sprintf(buf,format,arg1,arg2,arg3,arg4,arg5)
+# define snprintf6(buf,bufsize,format,arg1,arg2,arg3,arg4,arg5,arg6)  sprintf(buf,format,arg1,arg2,arg3,arg4,arg5,arg6)
+# define vsnprintf(buf,bufsize,format,ap)                        vsprintf(buf,format,ap)
 #endif
 
 
@@ -181,13 +188,14 @@ extern int _rl_horizontal_scroll_mode;
 
 /* in main.c: */
 extern int master_pty_fd;
-extern int slave_pty_fd;
+extern int slave_pty_sensing_fd;
 extern FILE *debug_fp;
 extern char *program_name, *command_name;
 extern int always_readline;
 extern int complete_filenames;
 extern pid_t command_pid;
 extern char *command_line;
+extern char *extra_char_after_completion;
 extern int i_am_child;
 extern int nowarn;
 extern int debug;
@@ -196,6 +204,7 @@ extern int one_shot_rlwrap;
 extern char *substitute_prompt;
 extern char *history_format;
 extern char *forget_regexp;
+extern char *multi_line_tmpfile_ext;
 extern char *prompt_regexp;
 extern int renice;
 extern int ignore_queued_input;
@@ -209,12 +218,14 @@ extern int one_shot_rlwrap;
 extern int ansi_colour_aware;
 extern int colour_the_prompt;
 extern int received_WINCH;
-extern int we_still_have_to_display_the_prompt;
+extern int prompt_is_still_uncooked;
 extern int impatient_prompt;
 extern int we_just_got_a_signal_or_EOF;
 extern int remember_for_completion;
 extern int commands_children_not_wrapped; 
 extern int accepted_lines;
+extern char *filter_command;
+extern int polling;
 
 void cleanup_rlwrap_and_exit(int status);
 void put_in_output_queue(char *stuff);
@@ -253,7 +264,7 @@ extern int leave_prompt_alone;
 
 
 /* in signals.c */
-extern int command_is_dead;
+extern volatile int command_is_dead;
 extern int commands_exit_status;
 extern int filter_is_dead;
 extern int filters_exit_status;
@@ -295,9 +306,18 @@ void  write_patiently2(int fd, const void *buffer, int count, int uninterruptibl
 void  mysetenv(const char *name, const char *value);
 void  set_ulimit(int resource, long value);
 void  usage(int status);
-void  mywarn(const char *message, ...);
-void  myerror(const char *message, ...);
-void *mymalloc(size_t size);
+int   open_unique_tempfile(const char *suffix, char **tmpfile_name);
+
+
+/* flags to use for the error_flags argument to myerror */
+#define FATAL     2
+#define WARNING   0
+#define USE_ERRNO 1
+#define NOERRNO   0
+
+
+void  myerror(int error_flags, const char *message, ...);
+void  *mymalloc(size_t size);
 void  myfree(void *ptr);
 void  mysetsid(void);
 void  close_open_files_without_writing_buffers(void);
@@ -327,6 +347,7 @@ char *add3strings(const char *str1, const char *str2, const char *str3);
 #define add2strings(a,b)  add3strings(a,b,"")
 char *mystrtok(const char *s, const char *delim);
 char **split_with(const char *string, const char *delim);
+char *unsplit_with(int n, char ** strings, const char *delim);
 char **split_on_single_char(const char *string, char c);
 int scan_metacharacters(const char* string, const char *metacharacters);
 char **list4 (char *el0, char *el1, char *el2, char *el3);
@@ -340,11 +361,13 @@ char *search_and_replace(char *patt, char *repl, const char *string,
 char *first_of(char **strings);
 char *as_string(int i);
 char *append_and_expand_history_format(char *line);
+void remove_padding_and_terminate(char *buf, int length);
 void unbackspace(char* buf);
+void test_unbackspace (const char *input, const char *expected_result);
 char *mark_invisible(const char *buf);
 char *copy_and_unbackspace(const char *original);
-int colourless_strlen(const char *str, char **copy_without_ignore_markers);
-int colourless_strlen_unmarked (const char *str);
+int colourless_strlen(const char *str, char **pcopy_without_ignore_markers, int termwidth);
+int colourless_strlen_unmarked (const char *str, int termwidth);
 char *get_last_screenline(char *long_line, int termwidth);
 char *lowercase(const char *str);
 char *colour_name_to_ansi_code(const char *colour_name);
@@ -358,6 +381,7 @@ struct termios *get_pterm_slave(void);
 void mirror_slaves_echo_mode(void);
 void completely_mirror_slaves_terminal_settings(void);
 void completely_mirror_slaves_output_settings(void);
+void completely_mirror_slaves_special_characters(void);
 void write_EOF_to_master_pty(void);
 void write_EOL_to_master_pty(char *);
 int dont_wrap_command_waits(void);
@@ -391,6 +415,7 @@ void clear_line(void);
 void clear_the_screen(void);
 void curs_up(void);
 void curs_down(void);
+void curs_left(void);
 void test_terminal(void);
 int my_putchar(TPUTS_PUTC_ARGTYPE c);
 void my_putstr(const char *string);
@@ -400,7 +425,7 @@ extern int terminal_settings_saved;
 extern struct winsize winsize;
 extern char *term_name;
 extern char *term_backspace, term_eof, term_stop, *term_cursor_hpos,
-  *term_cursor_up, *term_cursor_down;
+  *term_cursor_up, *term_cursor_down, *term_cursor_left, *term_rmcup, *term_rmkx;
 extern int newline_came_last;
 
 /* in filter.c */
@@ -474,7 +499,7 @@ void filter_test(void);
 #  define FORCE_HOMEGROWN_REDISPLAY              256 /* force use of my_homegrown_redisplay()        */
 #  define DEBUG_LONG_STRINGS                     512 /* log all strings completely, however long they are */ 
 #  define DEBUG_RACES                            1024 /* introduce random delays */  
-#  define DEBUG_RANDOM_FAIL                      2048 /* fail tests radnomly */
+#  define DEBUG_RANDOM_FAIL                      2048 /* fail tests randomly */
 #  define DEBUG_TEST_MAIN                        4096 /* run test_main and exit  */
 
 #  define DEBUG_MAX                              DEBUG_TEST_MAIN
@@ -497,26 +522,26 @@ void filter_test(void);
   fprintf(debug_fp, "%-20s %s %-25.25s ", file_line, when, __FUNCTION__);\
 
 
-#  define NL_AND_FLUSH                            fputc('\n', debug_fp) ; fflush(debug_fp); debug = debug_saved;
+#  define NL_AND_FLUSH           fputc('\n', debug_fp) ; fflush(debug_fp); debug = debug_saved;
 
 #  define DPRINTF0(mask, format)                                        \
-  if (debug & mask && debug_fp) {WHERE_AND_WHEN; fprintf(debug_fp, format); NL_AND_FLUSH; }
+  if ((debug & mask) && debug_fp) {WHERE_AND_WHEN; fprintf(debug_fp, format); NL_AND_FLUSH; }
 
 #  define DPRINTF1(mask, format,arg)                                    \
-  if (debug & mask && debug_fp) {WHERE_AND_WHEN; fprintf(debug_fp, format, arg); NL_AND_FLUSH; }
+  if ((debug & mask) && debug_fp) {WHERE_AND_WHEN; fprintf(debug_fp, format, arg); NL_AND_FLUSH; }
 
 #  define DPRINTF2(mask, format,arg1, arg2)                             \
-  if (debug & mask && debug_fp) {WHERE_AND_WHEN; fprintf(debug_fp, format, arg1, arg2); NL_AND_FLUSH; }
+  if ((debug & mask) && debug_fp) {WHERE_AND_WHEN; fprintf(debug_fp, format, arg1, arg2); NL_AND_FLUSH; }
 
 #  define DPRINTF3(mask, format,arg1, arg2, arg3)                       \
-  if (debug & mask && debug_fp) {WHERE_AND_WHEN; fprintf(debug_fp, format, arg1, arg2, arg3); NL_AND_FLUSH; }
+  if ((debug & mask) && debug_fp) {WHERE_AND_WHEN; fprintf(debug_fp, format, arg1, arg2, arg3); NL_AND_FLUSH; }
 
 #  define DPRINTF4(mask, format,arg1, arg2, arg3, arg4)                 \
-  if (debug & mask && debug_fp) {WHERE_AND_WHEN; fprintf(debug_fp, format, arg1, arg2, arg3,arg4); NL_AND_FLUSH; }
+  if ((debug & mask) && debug_fp) {WHERE_AND_WHEN; fprintf(debug_fp, format, arg1, arg2, arg3,arg4); NL_AND_FLUSH; }
 
 #  define ERRMSG(b)              (b && (errno != 0) ? add3strings("(", strerror(errno), ")") : "" )
 
-#  define SHOWCURSOR(c)          if (debug & DEBUG_READLINE) {my_putchar(c); mymicrosleep(800); backspace(1);} /* (doesn't work correctly at last column!)*/
+#  define SHOWCURSOR(c)          if (debug & DEBUG_READLINE) {my_putchar(c); mymicrosleep(1200); curs_left();} /* (may work incorrectly at last column!)*/
 
 #  define DEBUG_RANDOM_SLEEP        if (debug & DEBUG_RACES) {int sleeptime=rand()&31; DPRINTF1(DEBUG_RACES,"sleeping for %d msecs", sleeptime); mymicrosleep(sleeptime);}
 

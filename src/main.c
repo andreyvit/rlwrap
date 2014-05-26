@@ -29,11 +29,13 @@ char *password_prompt_search_string = NULL;  /* (part of) password prompt (argum
 int ansi_colour_aware = FALSE;               /* -A option: make readline aware of ANSI colour codes in prompt */
 int complete_filenames = FALSE;	             /* -c option: whether to complete file names        */
 int debug = 0;			             /* -d option: debugging mask                        */
+char *extra_char_after_completion = " ";     /* -e option: override readlines's default completion_append_char (space) */
 int history_duplicate_avoidance_policy =
   ELIMINATE_SUCCESIVE_DOUBLES;               /* -D option: whether and how to avoid duplicate history entries */
 char *history_format = NULL;                 /* -F option: format to append to history entries            */
 char *forget_regexp = NULL;                  /* -g option: keep matching input out of history           */
 int pass_on_sigINT_as_sigTERM =  FALSE;      /* -I option: send a SIGTERM to client when a SIGINT is received */
+char *multi_line_tmpfile_ext = NULL;         /* -M option: tmpfile extension for multi-line editor */
 int nowarn = FALSE;		             /* -n option: suppress warnings */
 int commands_children_not_wrapped =  FALSE;  /* -N option: always use direct mode when <command> is waiting */
 int one_shot_rlwrap = FALSE;                 /* -o option: whether to close the pty after writing the first line to <command> */
@@ -41,6 +43,7 @@ char *prompt_regexp = NULL;		     /* -O option: only ever "cook" prompts matchin
 int colour_the_prompt = FALSE;	             /* -p option: whether we should paint the prompt */
 int renice = FALSE;                          /* -R option: whether to be nicer than command */
 int wait_before_prompt =  40;	             /* -w option: how long we wait before deciding we have a cookable prompt (in msec)) */
+int polling = FALSE;                         /* -W option: always give select() a small (=wait_before_prompt) timeout. */
 int impatient_prompt = TRUE;                 /* show raw prompt as soon as possible, even before we cook it. may result in "flashy" prompt */
 char *substitute_prompt = NULL;              /* -S option: substitute our own prompt for <command>s */
 char *filter_command = NULL;                 /* -z option: pipe prompts, input, output, history and completion requests through an external filter */
@@ -48,7 +51,7 @@ char *filter_command = NULL;                 /* -z option: pipe prompts, input, 
 
 /* variables for global bookkeeping */
 int master_pty_fd;		     /* master pty (rlwrap uses this to communicate with client) */
-int slave_pty_fd;		     /* slave pty (client uses this to communicate with rlwrap,
+int slave_pty_sensing_fd;		     /* slave pty (client uses this to communicate with rlwrap,
 				      * we keep it open after forking in order to keep track of
 				      * client's terminal settings */
 FILE *debug_fp = NULL;  	     /* filehandle of debugging log */
@@ -59,11 +62,11 @@ pid_t command_pid = 0;		     /* pid of child (client), or 0 before child is born
 int i_am_child = FALSE;		     /* Am I child or parent? after forking, child will set this to TRUE */
 int ignore_queued_input = FALSE;     /* read and then ignore all characters in input queue until it is empty (i.e. read would block) */
 int received_WINCH = FALSE;          /* flag set in SIGWINCH signal handler: start line edit as soon as possible */
-int we_still_have_to_display_the_prompt = TRUE; /* The main loop consults this variable to determine the select() timeout: when TRUE, it is
-                                                   a few millisecs, if FALSE, it is infinite.						
-                                                   TRUE just after receiving command output (when we still don't know whether we have a
-                                                   prompt), and, importantly, at startup (so that substitute prompts get displayed even with
-                                                   programs that don't have a startup message, such as cat)  */
+int prompt_is_still_uncooked = TRUE; /* The main loop consults this variable to determine the select() timeout: when TRUE, it is
+                                        a few millisecs, if FALSE, it is infinite.						
+                                        TRUE just after receiving command output (when we still don't know whether we have a
+                                        prompt), and, importantly, at startup (so that substitute prompts get displayed even with
+                                        programs that don't have a startup message, such as cat)  */
 						
 int we_just_got_a_signal_or_EOF = FALSE;  /* When we got a signal or EOF, and the program sends something that ends in a newline, take it
 					     as a response to user input - i.e. preserve a cooked prompt and just print the new output after it */
@@ -83,21 +86,21 @@ static char *client_term_name = NULL; /* we'll set TERM to this before exec'ing 
 static int feed_history_into_completion_list = FALSE;
 
 /* private functions */
-static void init_rlwrap(void);
+static void init_rlwrap(char *command_line);
 static void fork_child(char *command_name, char **argv);
 static char *read_options_and_command_name(int argc, char **argv);
 static void main_loop(void);
 static void test_main(void);
 
-/* static void test_main(void); */
+
 
 /* options */
 #ifdef GETOPT_GROKS_OPTIONAL_ARGS
-static char optstring[] = "+:a::Ab:cC:d::D:f:F:g:hH:iIl:nNm::oO:p::P:q:rRs:S:t:Tvw:z:";
+static char optstring[] = "+:a::Ab:cC:d::D:e:f:F:g:hH:iIl:nNM:m::oO:p::P:q:rRs:S:t:Tvw:Wz:";
 /* +: is not really documented. configure checks wheteher it works as expected
    if not, GETOPT_GROKS_OPTIONAL_ARGS is undefined. @@@ */
 #else
-static char optstring[] = "+:a:Ab:cC:d:D:f:F:g:hH:iIl:nNm:oO:p:P:q:rRs:S:t:Tvw:z:";	
+static char optstring[] = "+:a:Ab:cC:d:D:e:f:F:g:hH:iIl:nNM:m:oO:p:P:q:rRs:S:t:Tvw:Wz:";	
 #endif
 
 #ifdef HAVE_GETOPT_LONG
@@ -108,6 +111,7 @@ static struct option longopts[] = {
   {"complete-filenames", 	no_argument, 		NULL, 'c'},
   {"command-name", 		required_argument, 	NULL, 'C'},
   {"debug", 			optional_argument, 	NULL, 'd'},
+  {"extra-char-after-completion", required_argument,    NULL, 'e'},
   {"history-no-dupes", 		required_argument, 	NULL, 'D'},
   {"file", 			required_argument, 	NULL, 'f'},
   {"history-format", 		required_argument, 	NULL, 'F'},
@@ -117,11 +121,12 @@ static struct option longopts[] = {
   {"case-insensitive", 		no_argument, 		NULL, 'i'},
   {"pass-sigint-as-sigterm",    no_argument,            NULL, 'I'},
   {"logfile", 			required_argument, 	NULL, 'l'},
+  {"multi-line", 		optional_argument, 	NULL, 'm'},
+  {"multi-line-ext",            required_argument,      NULL, 'M'},
   {"no-warnings", 		no_argument, 		NULL, 'n'},
   {"no-children",               no_argument,            NULL, 'N'},
   {"one-shot",                  no_argument,            NULL, 'o'},
   {"only-cook",                 required_argument,      NULL, 'O'},
-  {"multi-line", 		optional_argument, 	NULL, 'm'},
   {"prompt-colour",             optional_argument,      NULL, 'p'},
   {"pre-given", 		required_argument, 	NULL, 'P'},
   {"quote-characters",          required_argument,      NULL, 'q'},
@@ -133,35 +138,38 @@ static struct option longopts[] = {
   {"test-terminal",  		no_argument, 		NULL, 'T'},
   {"version", 			no_argument, 		NULL, 'v'},
   {"wait-before-prompt",        required_argument,      NULL, 'w'},    
+  {"polling",                   no_argument,            NULL, 'W'},
   {"filter",                    required_argument,      NULL, 'z'}, 
   {0, 0, 0, 0}
 };
 #endif
 
 
+
+/*
+ * main function. initialises everything and calls main_loop(),
+ * which never returns
+ */
+
 int
 main(int argc, char **argv)
 { 
   char *command_name;
-  
+  char *command_line = unsplit_with(argc, argv, " ");  
+
   init_completer();
   command_name = read_options_and_command_name(argc, argv);
-
-  if (debug)
-     test_main();            /* scaffolding for quick tests */
   
   /* by now, optind points to <command>, and &argv[optind] is <command>'s argv */
   if (!isatty(STDIN_FILENO) && execvp(argv[optind], &argv[optind]) < 0)
     /* if stdin is not a tty, just execute <command> */ 
-    myerror("Cannot execute %s", argv[optind]);	
-  init_rlwrap();
+    myerror(FATAL|USE_ERRNO, "Cannot execute %s", argv[optind]);	
+  init_rlwrap(command_line);
   install_signal_handlers();	
   block_all_signals();
   fork_child(command_name, argv);
   if (filter_command)
     spawn_filter(filter_command);
-
-  
   
   main_loop();
   return 42;			/* not reached, but some compilers are unhappy without this ... */
@@ -204,7 +212,7 @@ fork_child(char *command_name, char **argv)
 	fprintf(stderr, "Did you mean '%s' to be an option argument?\nThen you should write -%c%s, without the space(s)\n",
                 argv[optind], last_opt, arg); 
       }
-      myerror("Cannot execute %s", argv[optind]);   	/* stillborn child, parent will live on and display child's last gasps */
+      myerror(FATAL|USE_ERRNO, "Cannot execute %s", argv[optind]);   	/* stillborn child, parent will live on and display child's last gasps */
     }
   }
 }
@@ -218,14 +226,16 @@ fork_child(char *command_name, char **argv)
 void
 main_loop()
 {				
-  int nfds, i;			
+  int nfds;			
   fd_set readfds;	
   fd_set writefds;
   int nread;		
-  char buf[BUFFSIZE], *timeoutstr, *new_output_minus_prompt;
+  char buf[BUFFSIZE], *timeoutstr, *old_raw_prompt, *new_output_minus_prompt;
   int promptlen = 0;
   int leave_prompt_alone;
   sigset_t no_signals_blocked;
+  int seen_EOF = FALSE;     
+
    
   struct timespec         select_timeout, *select_timeoutptr;
   struct timespec immediately = { 0, 0 }; /* zero timeout when child is dead */
@@ -234,7 +244,6 @@ main_loop()
   wait_a_little.tv_nsec = 1000 * 1000 * wait_before_prompt;
 
   
-  
   sigemptyset(&no_signals_blocked);
   
 
@@ -242,7 +251,7 @@ main_loop()
   last_minute_checks();
   pass_through_filter(TAG_OUTPUT,""); /* If something is wrong with filter, get the error NOW */
   set_echo(FALSE);		/* This will also put the terminal in CBREAK mode */
-  test_main();
+	test_main(); 
   
   /* ------------------------------  main loop  -------------------------------*/
   while (TRUE) {
@@ -258,12 +267,12 @@ main_loop()
 
 
 
-    DPRINTF1(DEBUG_AD_HOC, "we_still_have_to_display_the_prompt =  %d", we_still_have_to_display_the_prompt);
+    DPRINTF1(DEBUG_AD_HOC, "prompt_is_still_uncooked =  %d", prompt_is_still_uncooked);
     if (command_is_dead || ignore_queued_input) {
       select_timeout = immediately;
       select_timeoutptr = &select_timeout;
       timeoutstr = "immediately";
-    } else if (we_still_have_to_display_the_prompt) {
+    } else if (prompt_is_still_uncooked || polling) {
       select_timeout = wait_a_little;
       select_timeoutptr = &select_timeout;
       timeoutstr = "wait_a_little";
@@ -297,10 +306,10 @@ main_loop()
     }	
     
     if (nfds < 0) {		/* exception  */	
-      if (errno == EINTR) {	/* interrupted by signal */
+      if (errno == EINTR || errno == 0) {	/* interrupted by signal, or by a cygwin bug (errno == 0) :-( */
 	continue;
       }	else
-	myerror("select received exception");
+	myerror(FATAL|USE_ERRNO, "select received exception");
     } else if (nfds == 0) {
       
       /* timeout, which can only happen when .. */
@@ -314,10 +323,10 @@ main_loop()
 		 "select returned 0, command_is_dead=%d, commands_exit_status=%d",
 		 command_is_dead, commands_exit_status);
 	cleanup_rlwrap_and_exit(EXIT_SUCCESS);
-      }	else if (we_still_have_to_display_the_prompt) { /* cooking time? */
+      }	else if (prompt_is_still_uncooked) { /* cooking time? */
 	if (we_just_got_a_signal_or_EOF) {
 	  we_just_got_a_signal_or_EOF = FALSE;              /* 1. If we got a signal/EOF before cooking time, we don't need special action
-                                                               to preserve the cooked prompt.
+                                                                  to preserve the cooked prompt.
 							       2. Reset we_just_got_a_signal_or_EOF  after a signal or EOF that didn't kill command */
           continue;
 	}	
@@ -334,82 +343,133 @@ main_loop()
 	  
 	  if (accepted_lines == 1 && one_shot_rlwrap) 
 	    cleanup_rlwrap_and_exit(EXIT_SUCCESS);
-	  
+
+			  
 	  move_cursor_to_start_of_prompt(ERASE); /* cooked prompt may be shorter than raw prompt, hence the ERASE */
 	  /* move and erase before cooking, as we need to move/erase according
 	     to the raw prompt */
-	  cook_prompt_if_necessary();
+          cook_prompt_if_necessary();
 	  DPRINTF2(DEBUG_READLINE,"After cooking, raw_prompt=%s, cooked=%s",
                    mangle_string_for_debug_log(saved_rl_state.raw_prompt, MANGLE_LENGTH),
                    mangle_string_for_debug_log(saved_rl_state.cooked_prompt, MANGLE_LENGTH));
 	  my_putstr(saved_rl_state.cooked_prompt);
 	  rlwrap_already_prompted = TRUE;
 	}
-	we_still_have_to_display_the_prompt = FALSE;
+	prompt_is_still_uncooked = FALSE;
+      } else if (polling) {
+        completely_mirror_slaves_special_characters();
+        continue;
       } else {
-	myerror("unexpected select() timeout");
+	myerror(FATAL|NOERRNO, "unexpected select() timeout");
       }
     } else if (nfds > 0) {	/* Hah! something to read or write */ 
+
       /* -------------------------- read pty --------------------------------- */
-      if (FD_ISSET(master_pty_fd, &readfds)) { /* there is something to read on master pty: */
-	if ((nread = read(master_pty_fd, buf, BUFFSIZE - 1)) <= 0) { /* read it */
-	 
-	  if (command_is_dead || nread == 0) { /*  child is dead or has closed its stdout */
+      /* Always first read and process the slave command's output, even if there is input waiting on stdin 
+         (which may happen when pasting a lot of text). E.g. when pasting "a\nb\nc" into "rlwrap cat" we want
+         a 
+         a
+         b
+         b
+         c
+         c
+
+         and not
+  
+         a
+         b
+         c
+         a
+         b
+         c
+      */ 
+      if (FD_ISSET(master_pty_fd, &readfds)) { /* there is something (or nothing, if EOF) to read on master pty: */
+        nread = read(master_pty_fd, buf, BUFFSIZE - 1); /* read it */
+        DPRINTF1(DEBUG_AD_HOC, "nread: %d", nread);
+	if (nread <= 0) { 
+	  if (command_is_dead || nread == 0) { /*  we catched a SIGCHLD,  or slave command has closed its stdout */
 	    if (promptlen > 0)	/* commands dying words were not terminated by \n ... */
 	      my_putchar('\n');	/* provide the missing \n */
 	    cleanup_rlwrap_and_exit(EXIT_SUCCESS);
-	  } else  if (errno == EINTR)	/* interrupted by signal ...*/	                     
+	  } else  if (errno == EINTR) {	/* interrupted by signal ...*/	                     
 	    continue;                   /* ... don't worry */
-	  else
-	    myerror("read error on master pty");
+	  } else  if (! seen_EOF) {     /* maybe command has just died (and SIGCHLD, whose handler sets command_is_dead is not  */     
+            mymicrosleep(50);           /* yet caught) Therefore we wait a bit,                                                 */
+            seen_EOF = TRUE;            /* set a flag                                                                           */   
+            continue;                   /* and try one more time (hopefully catching the signal this time round                 */
+          } else {
+            myerror(FATAL|USE_ERRNO, "read error on master pty"); 
+          }
 	}
 	  
 	completely_mirror_slaves_output_settings(); /* some programs (e.g. joe) need this. Gasp!! */	
-        buf[nread] = '\0';      /* buf contains nread chars worth of clients output, zero-terminate it */
+        
 	
         if (skip_rlwrap()) { /* Race condition here! The client may just have finished an emacs session and
 			        returned to cooked mode, while its ncurses-riddled output is stil waiting for us to be processed. */
 	  write_patiently(STDOUT_FILENO, buf, nread, "to stdout");
-	  DPRINTF3(DEBUG_TERMIO, "read from pty and wrote to stdout  %d (%d) bytes in direct mode  <%s>",
-                   nread, (int) strlen(buf), mangle_string_for_debug_log(buf, MANGLE_LENGTH));
+
+	  DPRINTF2(DEBUG_TERMIO, "read from pty and wrote to stdout  %d  bytes in direct mode  <%s>",
+                   nread, mangle_string_for_debug_log((buf[nread]='\0', buf), MANGLE_LENGTH));
 	  yield();
 	  continue;
 	}
 
-	
-	for (i=0; i < nread; i++)
-	  if (!buf[i])
-	    buf[i] = ' ';  /* replace NULL bytes by space. */
-	
-        DPRINTF2(DEBUG_TERMIO, "read %d bytes from pty into buffer: %s", nread,  mangle_string_for_debug_log(buf, MANGLE_LENGTH)); 
+	DPRINTF2(DEBUG_TERMIO, "read %d bytes from pty into buffer: %s", nread,  mangle_string_for_debug_log((buf[nread]='\0', buf), MANGLE_LENGTH));
+        
+        remove_padding_and_terminate(buf, nread);
+        
 	write_logfile(buf);
 	if (within_line_edit)	/* client output arrives while we're editing keyboard input:  */
 	  save_rl_state();      /* temporarily disable readline and restore the screen state before readline was called */
-
+  
 
 	assert(saved_rl_state.raw_prompt != NULL);
-	leave_prompt_alone = *saved_rl_state.raw_prompt == '\0' /* saved_rl_state.raw_prompt = "" in two distinct cases: when there is
-						                   actually no prompt, or just after accepting a line, when the cursor is at
-						                   the end of the prompt. In both cases, we dont't want to move the
-						                   cursor */
-          || we_still_have_to_display_the_prompt
-          || command_is_dead
+
+
+        /* We *always* compute the printable part and the new raw prompt, and *always* print the printable part
+           There are four possibilities:
+           1. impatient before cooking.         The raw prompt has been printed,  write the new output after it
+           2. patient before cooking            No raw prompt has been printed yet, don't print anything
+           3. impatient after cooking
+             3a  no current prompt              print the new output
+             3b  some current prompt            erase it, replace by current raw prompt and print new output
+           4. patient after cooking             don't print anything
+        */
+        
+        /* sometimes we want to leave the prompt standing, e.g. after accepting a line, or when a signal arrived */
+	leave_prompt_alone =
+	     *saved_rl_state.raw_prompt == '\0' /* saved_rl_state.raw_prompt = "" in two distinct cases: when there is actually no prompt,
+						   or just after accepting a line, when the cursor is at the end of the prompt. In both
+						   cases, we dont't want to move the cursor */
+          || prompt_is_still_uncooked /* in this case no prompt has been displayed yet */
+          || command_is_dead                    
           || (we_just_got_a_signal_or_EOF && strrchr(buf, '\n')); /* a signal followed by output with a newline in it: treat it as
                                                                      response to user input, so leave the prompt alone */
+
+        DPRINTF3(DEBUG_READLINE, "leave_prompt_alone: %s (raw prompt: %s, prompt_is_still_uncooked: %d)",
+                 (leave_prompt_alone? "yes" : "no"), mangle_string_for_debug_log(saved_rl_state.raw_prompt, MANGLE_LENGTH), prompt_is_still_uncooked);
 	
-        if (!leave_prompt_alone && (!impatient_prompt || !saved_rl_state.cooked_prompt))
-	  move_cursor_to_start_of_prompt(DONT_ERASE);  
+        if (!leave_prompt_alone) /* && (!impatient_prompt || !saved_rl_state.cooked_prompt)) */
+	  move_cursor_to_start_of_prompt(ERASE);  
 	else if (we_just_got_a_signal_or_EOF) {
 	  free (saved_rl_state.raw_prompt);
 	  saved_rl_state.raw_prompt =  mysavestring(""); /* prevent reprinting the prompt */
 	}	
-	  
+
+        if (impatient_prompt && !leave_prompt_alone)
+          old_raw_prompt =  mysavestring(saved_rl_state.raw_prompt);
+
         new_output_minus_prompt = process_new_output(buf, &saved_rl_state);	/* chop off the part after the last newline and put this in
 										   saved_rl_state.raw_prompt (or append buf if  no newline found)*/
 
 	if (impatient_prompt) {   /* in impatient mode, ALL command output is passed through the OUTPUT filter, including the prompt The
-				     prompt, however, is filtered separately (after wait-for-prompt milliseconds) and then displayed */
+				     prompt, however, is filtered separately at cooking time and then displayed */
 	  char *filtered = pass_through_filter(TAG_OUTPUT, buf);
+          if(!leave_prompt_alone) {
+            my_putstr(old_raw_prompt);
+            free(old_raw_prompt);
+          }
 	  my_putstr(filtered);
 	  free (filtered);
 	  rlwrap_already_prompted = TRUE;
@@ -421,7 +481,7 @@ main_loop()
 	free(new_output_minus_prompt);	
 
 		    
-	we_still_have_to_display_the_prompt = TRUE; 
+	prompt_is_still_uncooked = TRUE; 
        
 
 	if (within_line_edit)
@@ -449,7 +509,7 @@ main_loop()
 	  if (errno == EINTR)
 	    continue;
 	  else
-	    myerror("Unexpected error");
+	    myerror(FATAL|USE_ERRNO, "Unexpected error");
 	else if (nread == 0)	/* EOF on stdin */
 	  cleanup_rlwrap_and_exit(EXIT_SUCCESS);
         else if (ignore_queued_input)
@@ -496,16 +556,15 @@ main_loop()
 	yield(); /*  give  slave command time to respond. If we don't do this,
 		     nothing bad will happen, but the "dialogue" on screen will be
 		     out of order   */
-      }	
-
+      }
     }				/* if (ndfs > 0)         */
   }				/* while (1)             */
 }				/* void main_loop()      */
 
 
 /* Read history and completion word lists */
-void
-init_rlwrap()
+static void
+init_rlwrap(char *command_line)
 {
 
   char *homedir, *histdir, *homedir_prefix, *hostname;
@@ -516,13 +575,15 @@ init_rlwrap()
   if (debug) {    
     debug_fp = fopen(DEBUG_FILENAME, "w");
     if (!debug_fp)
-      myerror("Couldn't open debug file %s", DEBUG_FILENAME);
+      myerror(FATAL|USE_ERRNO, "Couldn't open debug file %s", DEBUG_FILENAME);
     setbuf(debug_fp, NULL); /* always write debug messages to disk at once */
   }
   hostname = getenv("HOSTNAME") ? getenv("HOSTNAME") : "?";
   now = time(NULL);
   DPRINTF0(DEBUG_ALL, "-*- mode: grep -*-");
+  DPRINTF1(DEBUG_ALL, "command line: %s", command_line);
   DPRINTF3(DEBUG_ALL, "rlwrap version %s, host: %s, time: %s", VERSION, hostname, ctime(&now));
+  
   init_terminal();
 
   
@@ -541,19 +602,27 @@ init_rlwrap()
     histdir = homedir;
     history_filename = add3strings(homedir_prefix, command_name, "_history");
   }
+  
   if (write_histfile) {
     if (access(history_filename, F_OK) == 0) {	/* already exists, can we read/write it? */
       if (access(history_filename, R_OK | W_OK) != 0) {
-	myerror("cannot read and write %s", history_filename);
+	myerror(FATAL|USE_ERRNO, "cannot read and write %s", history_filename);
       }
-    } else {			/* doesn't exist, can we create it? */
-      if (access(histdir, W_OK) != 0) {
-	myerror("cannot create history file in %s", histdir);
+    } else {			        /* doesn't exist, can we create it? */
+      if(access(histdir, W_OK) != 0) {
+        if (errno == ENOENT) {
+          mode_t oldmask = umask(0);
+          if (mkdir(histdir, 0700))       /* rwx------ */
+            myerror(FATAL|USE_ERRNO, "cannot create directory %s", histdir);
+          umask(oldmask);
+        } else {
+          myerror(FATAL|USE_ERRNO, "cannot create history file %s", history_filename);
+        }
       }
     }
   } else {			/* ! write_histfile */
     if (access(history_filename, R_OK) != 0) {
-      myerror("cannot read %s", history_filename);
+      myerror(FATAL|USE_ERRNO, "cannot read %s", history_filename);
     }
   }
 
@@ -603,8 +672,7 @@ check_optarg(char opt, int remaining)
       ((optarg[0] == '-' && isalpha(optarg[1])) || /* looks like next option */
        remaining == 0)) /* or is last item on command line */
 
-    mywarn
-      ("on this system, the getopt() library function doesn't\n"
+    myerror(WARNING|NOERRNO, "on this system, the getopt() library function doesn't\n"
        "grok optional arguments, so '%s' is taken as an argument to the -%c option\n"
        "Is this what you meant? If not, please provide an argument", optarg, opt);
 #endif
@@ -644,7 +712,7 @@ read_options_and_command_name(int argc, char **argv)
   
   full_program_name = mysavestring(argv[0]);
   program_name = mybasename(full_program_name);	/* normally "rlwrap"; needed by myerror() */
-  rl_basic_word_break_characters = " \t\n\r(){}[],+-=&^%$#@\";|\\";
+  rl_basic_word_break_characters = " \t\n\r(){}[],'+-=&^%$#@\";|\\";
 
   opterr = 0;			/* we do our own error reporting */
 
@@ -678,14 +746,13 @@ read_options_and_command_name(int argc, char **argv)
     case 'd':
 #ifdef DEBUG
       if (option_count > 1)
-        myerror("-d or --debug option has to be the *first* rlwrap option");
+        myerror(FATAL|NOERRNO, "-d or --debug option has to be the *first* rlwrap option");
       if (check_optarg('d', remaining))
         debug = atoi(optarg);
       else
         debug = DEBUG_DEFAULT;
 #else
-      myerror
-        ("To use -d( for debugging), configure %s with --enable-debug and rebuild",
+     myerror(FATAL|NOERRNO, "To use -d( for debugging), configure %s with --enable-debug and rebuild",
          program_name);
 #endif
       break;
@@ -693,8 +760,13 @@ read_options_and_command_name(int argc, char **argv)
     case 'D': 
       history_duplicate_avoidance_policy=atoi(optarg);
       if (history_duplicate_avoidance_policy < 0 || history_duplicate_avoidance_policy > 2)
-        myerror("%s option with illegal value %d, should be 0, 1 or 2",
+        myerror(FATAL|NOERRNO, "%s option with illegal value %d, should be 0, 1 or 2",
                 current_option('D', longindex), history_duplicate_avoidance_policy);
+      break;
+    case 'e':
+      extra_char_after_completion = mysavestring(optarg); 
+      if (strlen(extra_char_after_completion) > 1) 
+        myerror(FATAL|NOERRNO, "-e (--extra-char-after-completion) argument should be at most one character");
       break;
     case 'f':
       if (strncmp(optarg, ".", 10) == 0)
@@ -703,13 +775,13 @@ read_options_and_command_name(int argc, char **argv)
         feed_file_into_completion_list(optarg);
       opt_f = TRUE;
       break;
-    case 'F': myerror("The -F (--history-format) option is obsolete. Use -z \"history_format '%s'\" instead", optarg);
+    case 'F': myerror(FATAL|NOERRNO, "The -F (--history-format) option is obsolete. Use -z \"history_format '%s'\" instead", optarg);
     case 'g': forget_regexp = mysavestring(optarg); match_regexp("just testing", forget_regexp, 1); break;
-    case 'h':	usage(EXIT_SUCCESS);		/* will call exit() */
-    case 'H':	history_filename = mysavestring(optarg); break;
+    case 'h': usage(EXIT_SUCCESS);		/* will call exit() */
+    case 'H': history_filename = mysavestring(optarg); break;
     case 'i': 
       if (opt_f)
-        myerror("-i option has to precede -f options");
+        myerror(FATAL|NOERRNO, "-i option has to precede -f options");
       completion_is_case_sensitive = FALSE;
       break;
     case 'I':	pass_on_sigINT_as_sigTERM = TRUE; break;
@@ -717,11 +789,12 @@ read_options_and_command_name(int argc, char **argv)
     case 'n':	nowarn = TRUE; break;
     case 'm':
 #ifndef HAVE_SYSTEM
-      mywarn("the -m option doesn't work on this system");
+      myerror(WARNING|NOERRNO, "the -m option doesn't work on this system");
 #endif
       multiline_separator =
         (check_optarg('m', remaining) ? mysavestring(optarg) : " \\ ");
       break;
+    case 'M': multi_line_tmpfile_ext = mysavestring(optarg); break;
     case 'N': commands_children_not_wrapped = TRUE; break;
     case 'o': 
       one_shot_rlwrap = TRUE;
@@ -763,15 +836,15 @@ read_options_and_command_name(int argc, char **argv)
         impatient_prompt =  FALSE;
       }
       break;
+    case 'W': 
+      polling = TRUE; break;
     case 'z': filter_command = mysavestring(optarg);	break;
     case '?':
       assert(optind > 0);
-      myerror("unrecognised option %s\ntry '%s --help' for more information",
-              argv[optind-1], full_program_name);
+      myerror(FATAL|NOERRNO, "unrecognised option %s\ntry '%s --help' for more information", argv[optind-1], full_program_name);
     case ':':
       assert(optind > 0);
-      myerror
-        ("option %s requires an argument \ntry '%s --help' for more information",
+      myerror(FATAL|NOERRNO, "option %s requires an argument \ntry '%s --help' for more information",
          argv[optind-1], full_program_name);
 
     default:
@@ -800,10 +873,10 @@ read_options_and_command_name(int argc, char **argv)
 
     if (countback > 0) {	/* e.g -C 1 or -C 12 */
       if (argc - countback < optind)	/* -C 666 */
-	myerror("when using -C %d you need at least %d non-option arguments",
+	myerror(FATAL|NOERRNO, "when using -C %d you need at least %d non-option arguments",
 		countback, countback);
       else if (argv[argc - countback][0] == '-')	/* -C 2 perl -d blah.pl */
-	myerror("the last argument minus %d appears to be an option!",
+	myerror(FATAL|NOERRNO, "the last argument minus %d appears to be an option!",
 		countback);
       else {			/* -C 1 perl test.cgi */
 	command_name = mysavestring(mybasename(argv[argc - countback]));
@@ -811,16 +884,15 @@ read_options_and_command_name(int argc, char **argv)
       }
     } else if (countback == 0) {	/* -C name1 name2 or -C 0 */
       if (opt_C[0] == '0' && opt_C[1] == '\0')	/* -C 0 */
-	myerror("-C 0 makes no sense");
+	myerror(FATAL|NOERRNO, "-C 0 makes no sense");
       else if (strlen(mybasename(opt_C)) != strlen(opt_C))	/* -C dir/name */
-	myerror("-C option argument should not contain directory components");
+	myerror(FATAL|NOERRNO, "-C option argument should not contain directory components");
       else if (opt_C[0] == '-')	/* -C -d  (?) */
-	myerror("-C option needs argument");
+	myerror(FATAL|NOERRNO, "-C option needs argument");
       else			/* -C name */
 	command_name = opt_C;
     } else {			/* -C -2 */
-      myerror
-	("-C option needs string or positive number as argument, perhaps you meant -C %d?",
+      myerror (FATAL|NOERRNO, "-C option needs string or positive number as argument, perhaps you meant -C %d?",
 	 -countback);
     }
   } else {			/* no -C option given, use command name */
@@ -857,6 +929,12 @@ put_in_output_queue(char *stuff)
 
 }
 
+
+/*
+ * flush the output queue, writing its contents to master_pty_fd
+ * never write more than one line, or BUFFSIZE in one go
+ */
+
 void
 flush_output_queue()
 {
@@ -886,7 +964,7 @@ flush_output_queue()
     case EAGAIN:
       return;
     default:
-      myerror("write to master pty failed");
+      myerror(FATAL|USE_ERRNO, "write to master pty failed");
     }
   }
 
@@ -897,9 +975,6 @@ flush_output_queue()
 
   free(old_queue);
 }
-
-
-
 
 
 void
@@ -917,13 +992,13 @@ cleanup_rlwrap_and_exit(int status)
            command_pid, commands_exit_status, filter_pid, filters_exit_status);
   mymicrosleep(10); /* we may have got an EOF or EPIPE because the filter or command died, but this doesn't mean that
                        SIGCHLD has been caught already. Taking a little nap now improves the chance that we will catch it
-                       (no grave problem if we miss it, but diagnostics, exit status and transparant signal handling depend on it) */
+                       (no grave problem if we miss it, but diagnostics, exit status and transparent signal handling depend on it) */
   if (filter_pid) 
     kill_filter();
   else if (filter_is_dead) {
     int filters_killer = killed_by(filters_exit_status);
-    errno = 0;
-    mywarn((filters_killer ? "filter was killed by signal %d (%s)": WEXITSTATUS(filters_exit_status) ? "filter died" : "filter exited"), filters_killer, signal_name(filters_killer));
+    myerror(WARNING|NOERRNO, (filters_killer ? "filter was killed by signal %d (%s)" : 
+                              WEXITSTATUS(filters_exit_status) ? "filter died" : "filter exited"), filters_killer, signal_name(filters_killer));
   }     
   if (debug) 
     debug_postmortem();
@@ -954,6 +1029,13 @@ static void test_main() {
 #ifdef DEBUG
   if(debug & DEBUG_TEST_MAIN) {
     /* test, test */
+    test_unbackspace("abc","abc");
+    test_unbackspace("abc\bd","abd");
+    test_unbackspace("abc\r","abc");
+    test_unbackspace("abc\rd","dbc");
+    test_unbackspace("abc\bd\re","ebd");
+    test_unbackspace("abc\rde\rf","fec");
+    puts("tests OK");
     exit(0);
   }     
       

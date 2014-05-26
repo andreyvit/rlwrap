@@ -1,11 +1,15 @@
 package RlwrapFilter;
 
+require 5.006;
+
 use strict;
 use vars qw($VERSION @ISA @EXPORT @EXPORT_OK $AUTOLOAD);
 
 sub when_defined($@);
 my $previous_tag = -1;
-my $last_cumulative_output = "";
+my $echo_has_been_handled = 0;
+my $saved_output = "";
+
 
 require Exporter;
 require AutoLoader;
@@ -34,9 +38,11 @@ use constant REJECT_PROMPT                    => "_THIS_CANNOT_BE_A_PROMPT_";
 my $we_are_running_under_rlwrap = defined $ENV{RLWRAP_COMMAND_PID};
 
 
-# die() and warn() must communicate via rlwrap, not via STDERR
-$SIG{__DIE__}  = \&die_with_error_message;
-$SIG{__WARN__} = \&warn_with_info_message;
+# die() and warn() must communicate via rlwrap, not via STDERR (unless we're running under perl -c)
+unless ($^C){
+  $SIG{__DIE__}  = \&die_with_error_message;
+  $SIG{__WARN__} = \&warn_with_info_message;
+}
 
 # automagically have a setter/getter for every key of %$self
 sub AUTOLOAD {
@@ -97,8 +103,6 @@ sub new {
   }
   return $self;
 }
-
-
 
 # event loop
 sub run {
@@ -177,18 +181,36 @@ sub out_of_band {
   return $tag > 128;
 }
 
+
+
+
+
+
 # split output in echo and the rest and call the appropriate handlers on them
 sub handle_output {
   my ($self, $message) = @_;
-  my ($echo, $handled_echo, $sep);
+  my ($echo, $handled_echo, $nl);
   if (defined $self -> {previous_tag} and $self -> {previous_tag} == TAG_INPUT) {
-      $self->{cumulative_output} = "";
-    ($echo, $sep, $message) = ($message =~ /^([^\n\r]*)(\r?\n)?(.*)?/s); #@@@ This doesn't work for multi-line input!
-    $handled_echo = when_defined $self -> echo_handler, "$echo";
+    $self->{cumulative_output} = "";
+    $echo_has_been_handled = 0;
+  }
+
+  if (not $echo_has_been_handled) {
+    if ($message !~ /\n/) {
+      $saved_output .= $message; # save all output until we have one *whole* echo line
+      return "";
+    } else {                    # ... then process it
+      $message = $saved_output . $message;
+      $echo_has_been_handled = 1;
+      $saved_output = "";
+      ($echo, $nl, $message) = ($message =~ /^([^\n\r]*)(\r?\n)?(.*)?/s); #@@@ This doesn't work for multi-line input!
+      $handled_echo = when_defined $self -> echo_handler, "$echo";
+    }
   }
   $self->{cumulative_output} .= $message;
-  return $handled_echo . $sep .(when_defined $self -> output_handler, "$message");
+  return $handled_echo . $nl . (when_defined $self -> output_handler, "$message");
 }
+
 
 sub read_until { # read chunks from pty pointed to by $fh until either inactive for $timeout or
                  # $stoptext is seen at end-of-chunk
@@ -358,8 +380,8 @@ sub  send_ignore_oob {
 }
 
 sub die_with_error_message {
-  die $@ if $^S; # make die() within eval do the right thing
   my ($error_message) = @_;
+  die $error_message if $^S; # make die() within eval do the right thing
   my $myself = $0;
   $myself =~ s#^.*/([^.]+)$#$1#;
   write_message(TAG_ERROR, "$myself: $error_message");
@@ -802,12 +824,12 @@ tag byte, a 32-bit length and the message proper. This is not terribly
 useful when running a filter directly from the command line (outside
 rlwrap), even if we set the RLWRAP_*_FD ourselves.
 
-Therfore, when run directly from the command line, a filter expects
+Therefore, when run directly from the command line, a filter expects
 input messages on its standard input of the form
 
-TAG_PROMPT >
+TAG_PROMPT myprompt >
 
-(i.a. a tag name, one space and a message) and it will respond in the
+(i.a. a tag name, one space and a message followed by a newline) and it will respond in the
 same way on its standard output
 
 
